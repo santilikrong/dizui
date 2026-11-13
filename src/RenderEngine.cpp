@@ -16,34 +16,50 @@ RenderEngine::RenderEngine(GLFWwindow* window) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
-    // 1. Charger la police de texte système classique
-    ImFont* font = nullptr;
-    const char* font_paths[] = {
-        "/home/santili/.fonts/JetBrainsMono-Regular.ttf"
-    };
-    for (const char* path : font_paths) {
-        font = io.Fonts->AddFontFromFileTTF(path, 18.0f);
-        if (font != nullptr) break;
-    }
-    if (font == nullptr) io.Fonts->AddFontDefault();
-
-    // 2. FUSIONNER la police Lucide Icons brute depuis CMake
+    const char* font_path = "/home/santili/.fonts/JetBrainsMono-Regular.ttf";
     std::filesystem::path absolute_font_path = std::filesystem::path(DIZUI_ASSETS_DIR) / "lucide.ttf";
+    bool has_lucide = std::filesystem::exists(absolute_font_path) && std::filesystem::file_size(absolute_font_path) > 0;
 
-    if (std::filesystem::exists(absolute_font_path) && std::filesystem::file_size(absolute_font_path) > 0) {
-        ImFontConfig icons_config;
-        icons_config.MergeMode = true;
-        icons_config.PixelSnapH = true;
-        icons_config.GlyphMinAdvanceX = 16.0f;
-        icons_config.GlyphOffset.y = 4.0f; // Alignement vertical propre à Lucide
+    // Configuration de base pour la fusion des icônes Lucide
+    ImFontConfig icons_config;
+    icons_config.MergeMode = true;
+    icons_config.PixelSnapH = true;
+    icons_config.GlyphMinAdvanceX = 16.0f;
+    icons_config.GlyphOffset.y = 4.0f; 
+    static const ImWchar icons_ranges[] = { ICON_MIN_LC, ICON_MAX_LC, 0 };
 
-        // Définir la plage de recherche Lucide
-        static const ImWchar icons_ranges[] = { ICON_MIN_LC, ICON_MAX_LC, 0 };
-        
-        io.Fonts->AddFontFromFileTTF(absolute_font_path.string().c_str(), 20.0f, &icons_config, icons_ranges);
-        std::cout << "[dizui Info] Lucide Icons chargé avec succès !" << std::endl;
+    // -------------------------------------------------------------------------
+    // 1. CHARGEMENT DE LA POLICE PRINCIPALE (18.0f) + FUSION LUCIDE
+    // -------------------------------------------------------------------------
+    ImFont* main_font = nullptr;
+    if (std::filesystem::exists(font_path)) {
+        main_font = io.Fonts->AddFontFromFileTTF(font_path, 18.0f);
     } else {
-        std::cerr << "[dizui Error] Fichier introuvable : " << absolute_font_path << std::endl;
+        main_font = io.Fonts->AddFontDefault();
+    }
+
+    if (has_lucide && main_font != nullptr) {
+        // Associe les icônes à la police principale active dans tout l'IDE
+        io.Fonts->AddFontFromFileTTF(absolute_font_path.string().c_str(), 20.0f, &icons_config, icons_ranges);
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. CHARGEMENT DE LA POLICE COMPACTE COMBOBOX (13.0f) + FUSION LUCIDE
+    // -------------------------------------------------------------------------
+    ImFont* small_font = nullptr;
+    if (std::filesystem::exists(font_path)) {
+        small_font = io.Fonts->AddFontFromFileTTF(font_path, 15.0f);
+        
+        if (has_lucide && small_font != nullptr) {
+            // Associe ÉGALEMENT les icônes à la petite police pour qu'elles s'affichent dans les combos
+            io.Fonts->AddFontFromFileTTF(absolute_font_path.string().c_str(), 14.0f, &icons_config, icons_ranges);
+        }
+    }
+
+    if (has_lucide) {
+        std::cout << "[dizui Info] Lucide Icons chargé et fusionné sur toutes les tailles avec succès !" << std::endl;
+    } else {
+        std::cerr << "[dizui Error] Fichier d'icônes introuvable : " << absolute_font_path << std::endl;
     }
 
     // Configuration de style d'interface

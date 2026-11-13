@@ -3,22 +3,61 @@
 #include <imgui_internal.h>
 #include <GLFW/glfw3.h>
 #include "IconsLucide.hpp"
+#include <cppsqlx/task.hpp>
+#include <cppsqlx/job.hpp>
+#include <cppsqlx/workflow.hpp>
+#include <cppsqlx/logger.hpp>
+#include <iostream>
+#include <fstream>
+#include <cppsqlx/sqlliterals.hpp>
+#include <cppsqlx/sqljoinexpressionbuilder.hpp>
+#include <cppsqlx/selectquery.hpp>
+#include <cppsqlx/statement.hpp>
 
-Application::Application() {
-    m_windowManager = std::make_unique<WindowManager>(1600, 900, "dizui - Linux C++20 Workspace");
+using namespace cppsqlx::literals;
+
+Application::Application()
+{
+    m_windowManager = std::make_unique<WindowManager>(2200, 1200, "dizui - Linux C++20 Workspace");
     m_renderEngine = std::make_unique<RenderEngine>(m_windowManager->getNativeWindow());
-    
-    // Initialisation des deux éditeurs graphiques autonomes
-    m_workflowContext = ed::CreateEditor();
-    m_queryContext = ed::CreateEditor();
+
+    ed::Config canvasConfig;
+    canvasConfig.SettingsFile = nullptr;
+    canvasConfig.NavigateButtonIndex = 1;    // 1 = Clic droit maintenu pour déplacer le canevas (0 = Gauche, 2 = Molette)
+    canvasConfig.ContextMenuButtonIndex = 2; // 2 = Clic molette pour menu contextuel (libère le clic droit pour le Pan)
+    canvasConfig.EnableSmoothZoom = true;
+
+    m_workflowContext = ed::CreateEditor(&canvasConfig);
+    m_queryContext = ed::CreateEditor(&canvasConfig);
+
+    auto res = cppsqlx::DataIntegrationProject::loadFromDisk("/home/santili/cppsqlx/projects/finance/project.json");
+    if (res)
+    {
+        m_activeProject = std::make_unique<cppsqlx::DataIntegrationProject>(std::move(*res));
+        m_activeProject->resolveDependencies();
+
+        if (m_activeProject->logicalConnections().empty())
+        {
+            cppsqlx::LogicalConnection mockGateway("Finance_DB_Gateway");
+            if (!m_activeProject->physicalConnections().empty())
+            {
+                for (const auto &[name, physConn] : m_activeProject->physicalConnections())
+                {
+                    mockGateway.registerEnvironment(name, physConn);
+                }
+            }
+            m_activeProject->logicalConnections().insert_or_assign("Finance_DB_Gateway", std::move(mockGateway));
+        }
+    }
 }
 
-Application::~Application() {
-    // Libération propre des ressources mémoire
-    if (m_workflowContext) ed::DestroyEditor(m_workflowContext);
-    if (m_queryContext) ed::DestroyEditor(m_queryContext);
+Application::~Application()
+{
+    if (m_workflowContext)
+        ed::DestroyEditor(m_workflowContext);
+    if (m_queryContext)
+        ed::DestroyEditor(m_queryContext);
 }
-
 
 void Application::run()
 {
@@ -36,9 +75,837 @@ void Application::run()
     }
 }
 
+cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
+{
+    if (m_visualQueryNodes.empty() || !m_activeProject)
+    {
+        return cppsqlx::SelectQuery{};
+    }
+
+    ed::SetCurrentEditor(m_queryContext);
+
+    cppsqlx::SelectQuery query;
+    std::vector<std::string> local_select_headers;
+
+    // Étape A : Clause SELECT
+    bool has_selection = false;
+    for (const auto &node : m_visualQueryNodes)
+    {
+        if (!m_activeProject->datasets().contains(node.datasetName))
+            continue;
+        const auto &dataset = m_activeProject->datasets().at(node.datasetName);
+
+        for (size_t col_idx : node.selectedColumns)
+        {
+            if (dataset.columns().contains(col_idx))
+            {
+                std::string field_name = dataset.columns().at(col_idx).name();
+                std::string qualified_col = node.alias.empty() ? field_name : (node.alias + "." + field_name);
+
+                // Alias SQL valide avec underscore (ex: "emp_nom", "ag_nom", "reg_nom")
+                std::string unique_alias = node.alias.empty() ? field_name : (node.alias + "_" + field_name);
+
+                query.select(operator""_col(qualified_col.c_str(), qualified_col.length()).as(unique_alias));
+                local_select_headers.push_back(unique_alias);
+                has_selection = true;
+            }
+        }
+    }
+
+    if (!has_selection)
+    {
+        query.select(operator""_col("*", 1));
+        local_select_headers.push_back("*");
+    }
+
+    // Mettre à jour immédiatement le cache des en-têtes d'UI pour le tableau bas
+    m_queryResultHeaders = local_select_headers;
+
+    // Étape B : Clause FROM
+    const auto &root_node = m_visualQueryNodes.front();
+    if (!m_activeProject->datasets().contains(root_node.datasetName))
+    {
+        ed::SetCurrentEditor(nullptr);
+        cppsqlx::SelectQuery{};
+    }
+
+    cppsqlx::Dataset root_dataset = m_activeProject->datasets().at(root_node.datasetName);
+    root_dataset.as(root_node.alias);
+    query.from(root_dataset);
+
+    // =========================================================================
+    // Étape C : Clauses JOIN (SQLJoinExpression) — RÉSOLUTION D'ORDRE TOPOLOGIQUE
+    // =========================================================================
+    // Registre pour suivre les alias de tables déjà introduits dans le FROM/JOIN
+    std::set<std::string> introduced_aliases;
+    introduced_aliases.insert(root_node.alias);
+
+    // Copie de travail des liens de jointures pour pouvoir les consommer par vagues
+    std::vector<VisualQueryLink> remaining_links;
+    for (const auto &link : m_visualQueryLinks)
+    {
+        if (link.startPinId >= 500000 || link.endPinId >= 500000)
+            continue; // Écarte les filtres WHERE
+        remaining_links.push_back(link);
+    }
+
+    size_t last_size = remaining_links.size() + 1;
+
+    // On boucle tant qu'il reste des liens à ordonner et qu'on progresse
+    while (!remaining_links.empty() && remaining_links.size() < last_size)
+    {
+        last_size = remaining_links.size();
+
+        for (auto it = remaining_links.begin(); it != remaining_links.end();)
+        {
+            uintptr_t src_node_id = it->startPinId / 1000;
+            uintptr_t dst_node_id = it->endPinId / 1000;
+
+            std::string src_alias = "";
+            std::string dst_alias = "";
+            std::string target_dataset_name = "";
+
+            for (const auto &n : m_visualQueryNodes)
+            {
+                if (n.id == src_node_id)
+                    src_alias = n.alias;
+                if (n.id == dst_node_id)
+                {
+                    dst_alias = n.alias;
+                    target_dataset_name = n.datasetName;
+                }
+            }
+
+            // On ne traite ce JOIN que si la table source (src_alias)
+            // a déjà été déclarée au-dessus dans la requête !
+            if (introduced_aliases.contains(src_alias))
+            {
+                if (!target_dataset_name.empty() && m_activeProject->datasets().contains(target_dataset_name))
+                {
+                    std::string left_raw_col = it->leftFieldName;
+                    if (auto dot = left_raw_col.find('.'); dot != std::string::npos)
+                        left_raw_col = left_raw_col.substr(dot + 1);
+
+                    std::string right_raw_col = it->rightFieldName;
+                    if (auto dot = right_raw_col.find('.'); dot != std::string::npos)
+                        right_raw_col = right_raw_col.substr(dot + 1);
+
+                    std::string final_left_field = src_alias + "." + left_raw_col;
+                    std::string final_right_field = dst_alias + "." + right_raw_col;
+
+                    cppsqlx::Dataset join_dataset = m_activeProject->datasets().at(target_dataset_name);
+
+                    std::string join_type_str = "INNER JOIN";
+                    if (it->type == cppsqlx::JoinType::LEFT)
+                        join_type_str = "LEFT JOIN";
+                    if (it->type == cppsqlx::JoinType::RIGHT)
+                        join_type_str = "RIGHT JOIN";
+                    if (it->type == cppsqlx::JoinType::FULL)
+                        join_type_str = "FULL JOIN";
+
+                    cppsqlx::SQLExpression left_expr = operator""_col(final_left_field.c_str(), final_left_field.length());
+                    cppsqlx::SQLExpression right_expr = operator""_col(final_right_field.c_str(), final_right_field.length());
+
+                    // Utilisation de l'itérateur it->op au lieu de link.op
+                    cppsqlx::SQLJoinExpression joinExpr;
+                    if (it->op == cppsqlx::SQLOperator::Equal)
+                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).equalOp();
+                    else if (it->op == cppsqlx::SQLOperator::NotEqual)
+                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).notEqualOp();
+                    else if (it->op == cppsqlx::SQLOperator::Greater)
+                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).greaterOp();
+                    else if (it->op == cppsqlx::SQLOperator::Less)
+                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).lessOp();
+                    else if (it->op == cppsqlx::SQLOperator::GreaterOrEqual)
+                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).greaterOrEqualOp();
+                    else if (it->op == cppsqlx::SQLOperator::LessOrEqual)
+                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).lessOrEqualOp();
+                    else
+                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).equalOp();
+
+                    // Injection propre ordonnée dans cppsqlx::SelectQuery
+                    query.join(join_type_str, std::make_shared<cppsqlx::Dataset>(join_dataset), dst_alias, joinExpr);
+
+                    // On enregistre que cette nouvelle table fait désormais partie du scope valide
+                    introduced_aliases.insert(dst_alias);
+                }
+
+                // Supprime le lien de la liste d'attente car il a été traité
+                it = remaining_links.erase(it);
+            }
+            else
+            {
+                // La table source n'est pas encore introduite, on reporte ce lien à la prochaine vague
+                ++it;
+            }
+        }
+    }
+
+    // Sécurité anti-graphe orphelin déconnecté
+    if (!remaining_links.empty())
+    {
+        std::cout << "[dizui Compiler] Warning : Certaines jointures sont orphelines et n'ont pu être ordonnées." << std::endl;
+    }
+
+    // =========================================================================
+    // Étape D : Clause WHERE (Prédicats) — MÉTHODES NOMMÉES CPPSQLX CORRIGÉES
+    // =========================================================================
+    for (const auto &pred : m_visualQueryPredicates)
+    {
+        if (pred.connectedSrcPinId != 0 && !pred.value.empty())
+        {
+            uintptr_t table_node_id = pred.connectedSrcPinId / 1000;
+            std::string live_pred_column = pred.targetColumn;
+
+            for (const auto &n : m_visualQueryNodes)
+            {
+                if (n.id == table_node_id)
+                {
+                    std::string raw_col = pred.targetColumn;
+                    if (auto dot = raw_col.find('.'); dot != std::string::npos)
+                        raw_col = raw_col.substr(dot + 1);
+
+                    live_pred_column = n.alias + "." + raw_col;
+                }
+            }
+
+            // 1. Instanciation de l'expression de colonne gauche (identifiant)
+            cppsqlx::SQLExpression col_expr = operator""_col(live_pred_column.c_str(), live_pred_column.length());
+
+            // 2. Instanciation typée de la valeur de droite
+            cppsqlx::SQLExpression val_expr;
+            try
+            {
+                // Si la chaîne saisie dans l'UI est un entier pur (ex: "1"), on utilise le constructeur d'entier
+                // pour que cppsqlx l'émette sous forme de constante numérique brute sans guillemets doubles.
+                size_t idx = 0;
+                long long num_val = std::stoll(pred.value, &idx);
+                if (idx == pred.value.length())
+                {
+                    val_expr = cppsqlx::SQLExpression(static_cast<int64_t>(num_val));
+                }
+                else
+                {
+                    // Sinon, on instancie une chaîne SQL littérale via le constructeur de string
+                    val_expr = cppsqlx::SQLExpression(pred.value);
+                }
+            }
+            catch (...)
+            {
+                // En cas d'échec de conversion (chaîne de caractères pure), on construit l'expression textuelle
+                val_expr = cppsqlx::SQLExpression(pred.value);
+            }
+
+            // 3. Construction de la structure WHERE binaire via vos méthodes membres
+            cppsqlx::SQLExpression final_where_expr;
+            if (pred.op == cppsqlx::SQLOperator::Equal)
+                final_where_expr = col_expr.equal(val_expr);
+            else if (pred.op == cppsqlx::SQLOperator::NotEqual)
+                final_where_expr = col_expr.notEqual(val_expr);
+            else if (pred.op == cppsqlx::SQLOperator::Greater)
+                final_where_expr = col_expr.greater(val_expr);
+            else if (pred.op == cppsqlx::SQLOperator::Less)
+                final_where_expr = col_expr.less(val_expr);
+            else if (pred.op == cppsqlx::SQLOperator::GreaterOrEqual)
+                final_where_expr = col_expr.greaterOrEqual(val_expr);
+            else if (pred.op == cppsqlx::SQLOperator::LessOrEqual)
+                final_where_expr = col_expr.lessOrEqual(val_expr);
+            else
+                final_where_expr = col_expr.equal(val_expr);
+
+            query.where(final_where_expr);
+        }
+    }
+
+    ed::SetCurrentEditor(nullptr);
+    return query;
+}
+
+std::string Application::compileVisualGraphToSQL()
+{
+    if (m_visualQueryNodes.empty() || !m_activeProject)
+    {
+        return "";
+    }
+    return compileVisualGraphToSelectQuery().toSQL();
+}
+
+std::string Application::compileWorkflowToJSON(const std::string &workflowName)
+{
+    // Priorité au paramètre passé, sinon lecture du champ actif de l'interface
+    std::string effectiveName = workflowName.empty() ? std::string(m_activeWorkflowNameBuf) : workflowName;
+    if (effectiveName.empty())
+        effectiveName = "Workflow_Sans_Nom";
+
+    cppsqlx::Workflow workflow(effectiveName);
+
+    cppsqlx::ConnectionContext ctx;
+    ctx.name_ = effectiveName;
+    ctx.description_ = std::string(m_activeWorkflowDescBuf);
+    workflow.setContext(std::move(ctx));
+
+    std::map<uintptr_t, std::shared_ptr<cppsqlx::Job>> nodeIdToJobMap;
+
+    // 1. Création des Jobs avec leurs coordonnées et leur Task associée
+    for (const auto &node : m_workflowNodes)
+    {
+        auto job = std::make_shared<cppsqlx::Job>(node.taskName);
+
+        ed::SetCurrentEditor(m_workflowContext);
+        ImVec2 pos = ed::GetNodePosition(node.id);
+        ed::SetCurrentEditor(nullptr);
+
+        job->setX(static_cast<int>(pos.x));
+        job->setY(static_cast<int>(pos.y));
+
+        for (const auto &savedTask : m_savedTasks)
+        {
+            if (savedTask.name() == node.taskName)
+            {
+                job->addTask(1, std::make_shared<cppsqlx::Task>(savedTask));
+                break;
+            }
+        }
+
+        nodeIdToJobMap[node.id] = job;
+        workflow.addJob(job);
+    }
+
+    // 2. Conversion des câbles en Conditions de dépendance
+    for (const auto &link : m_workflowLinks)
+    {
+        uintptr_t srcNodeId = link.startPinId / 10;
+        uintptr_t dstNodeId = link.endPinId / 10;
+
+        if (nodeIdToJobMap.contains(srcNodeId) && nodeIdToJobMap.contains(dstNodeId))
+        {
+            auto parentJob = nodeIdToJobMap[srcNodeId];
+            auto childJob = nodeIdToJobMap[dstNodeId];
+
+            cppsqlx::Condition depCondition(parentJob->name(), cppsqlx::JobStatus::Success);
+            childJob->addCondition(std::move(depCondition));
+        }
+    }
+
+    return workflow.toJSON().dump(4);
+}
+
+nlohmann::json Application::serializeFullProjectToJSON()
+{
+    nlohmann::json rootJson;
+
+    if (m_activeProject)
+    {
+        // 1. Synchronisation des tâches et workflows courants dans m_activeProject
+        for (const auto &task : m_savedTasks)
+        {
+            m_activeProject->addTask(task);
+        }
+
+        for (const auto &wf : m_savedWorkflows)
+        {
+            try
+            {
+                nlohmann::json wfJson = nlohmann::json::parse(wf.jsonPreview);
+                auto wfRes = cppsqlx::Workflow::fromJSON(wfJson);
+                if (wfRes.has_value())
+                {
+                    m_activeProject->addWorkflow(std::move(wfRes.value()));
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        // 2. Sérialisation officielle complète (connexions, datasets, requêtes, tâches, jobs, workflows)
+        rootJson = m_activeProject->toJSON();
+    }
+
+    // 3. Ajout des métadonnées d'interface et des graphes visuels (positions, broches et câbles)
+    nlohmann::json uiState;
+    uiState["queries"] = nlohmann::json::array();
+    for (const auto &q : m_savedQueries)
+    {
+        uiState["queries"].push_back({{"name", q.name},
+                                      {"description", q.description},
+                                      {"sql", q.sql},
+                                      {"visual_state", q.visualState},
+                                      {"select_json", q.compiledSelectJson}});
+    }
+
+    uiState["workflows"] = nlohmann::json::array();
+    for (const auto &wf : m_savedWorkflows)
+    {
+        uiState["workflows"].push_back({{"name", wf.name},
+                                        {"description", wf.description},
+                                        {"json_preview", wf.jsonPreview},
+                                        {"visual_state", wf.visualState}});
+    }
+
+    rootJson["dizui_ui_state"] = std::move(uiState);
+    return rootJson;
+}
+
+bool Application::saveProjectToFile(const std::string &filePath)
+{
+    if (filePath.empty())
+        return false;
+
+    try
+    {
+        std::filesystem::path p(filePath);
+        m_currentProjectFilePath = filePath;
+        m_currentProjectName = p.stem().string();
+
+        if (!m_activeProject)
+        {
+            m_activeProject = std::make_unique<cppsqlx::DataIntegrationProject>(m_currentProjectName, filePath);
+        }
+        else
+        {
+            // Mise à jour en place pour conserver toutes les connexions et datasets en mémoire
+            m_activeProject->setName(m_currentProjectName);
+            m_activeProject->setPath(filePath);
+        }
+
+        std::ofstream outFile(filePath);
+        if (!outFile.is_open())
+        {
+            std::cerr << "[dizui Erreur] Impossible d'ouvrir le fichier en écriture : " << filePath << std::endl;
+            return false;
+        }
+
+        nlohmann::json fullJson = serializeFullProjectToJSON();
+        outFile << fullJson.dump(4);
+        outFile.close();
+
+        std::string windowTitle = "dizui Studio - " + m_currentProjectName + " [" + m_currentProjectFilePath + "]";
+        if (GLFWwindow *currentWin = glfwGetCurrentContext())
+        {
+            glfwSetWindowTitle(currentWin, windowTitle.c_str());
+        }
+
+        std::cout << "[dizui Info] Projet complet sauvegardé dans : " << filePath << std::endl;
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "[dizui Erreur] Échec de la sauvegarde : " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool Application::loadProjectFromFile(const std::string &filePath)
+{
+    if (filePath.empty())
+        return false;
+
+    try
+    {
+        std::ifstream inFile(filePath);
+        if (!inFile.is_open())
+        {
+            std::cerr << "[dizui Erreur] Impossible d'ouvrir le fichier : " << filePath << std::endl;
+            return false;
+        }
+
+        nlohmann::json rootJson;
+        inFile >> rootJson;
+        inFile.close();
+
+        // 1. Reconstruction officielle de DataIntegrationProject (connexions, datasets, tâches, workflows)
+        auto projRes = cppsqlx::DataIntegrationProject::fromJSON(rootJson);
+        if (!projRes.has_value())
+        {
+            std::cerr << "[dizui Erreur] JSON projet invalide : " << projRes.error() << std::endl;
+            return false;
+        }
+
+        // Instanciation unique (le doublon qui vidait l'objet a été supprimé)
+        m_activeProject = std::make_unique<cppsqlx::DataIntegrationProject>(std::move(projRes.value()));
+        m_activeProject->setPath(filePath);
+        m_activeProject->resolveDependencies();
+
+        // Assainissement des passerelles logiques dont le nom interne serait vide après fromJSON
+        for (auto &[gwKey, gwObj] : m_activeProject->logicalConnections())
+        {
+            if (gwObj.name().empty() && !gwKey.empty())
+            {
+                gwObj.setName(gwKey);
+            }
+        }
+
+        m_currentProjectFilePath = filePath;
+        m_currentProjectName = m_activeProject->name();
+
+        // 2. Nettoyage des canevas actifs
+        m_visualQueryNodes.clear();
+        m_visualQueryLinks.clear();
+        m_visualQueryPredicates.clear();
+        m_workflowNodes.clear();
+        m_workflowLinks.clear();
+        m_savedQueries.clear();
+        m_savedTasks.clear();
+        m_savedWorkflows.clear();
+
+        // 3. Repeuplement des tâches depuis m_activeProject
+        for (const auto &[tName, taskObj] : m_activeProject->tasks())
+        {
+            m_savedTasks.push_back(taskObj);
+        }
+
+        // 4. Restauration des requêtes et workflows avec leurs graphes visuels et JSON compilés
+        if (rootJson.contains("dizui_ui_state"))
+        {
+            const auto &uiState = rootJson["dizui_ui_state"];
+
+            if (uiState.contains("queries") && uiState["queries"].is_array())
+            {
+                for (const auto &qJson : uiState["queries"])
+                {
+                    SavedQuery sq;
+                    sq.name = qJson.value("name", "Requete");
+                    sq.description = qJson.value("description", "");
+                    sq.sql = qJson.value("sql", "");
+                    if (qJson.contains("visual_state"))
+                        sq.visualState = qJson["visual_state"];
+                    if (qJson.contains("select_json"))
+                        sq.compiledSelectJson = qJson["select_json"];
+                    m_savedQueries.push_back(std::move(sq));
+                }
+            }
+
+            if (uiState.contains("workflows") && uiState["workflows"].is_array())
+            {
+                for (const auto &wfJson : uiState["workflows"])
+                {
+                    SavedWorkflow swf;
+                    swf.name = wfJson.value("name", "Workflow");
+                    swf.description = wfJson.value("description", "");
+                    swf.jsonPreview = wfJson.value("json_preview", "");
+                    if (wfJson.contains("visual_state"))
+                        swf.visualState = wfJson["visual_state"];
+                    m_savedWorkflows.push_back(std::move(swf));
+                }
+            }
+        }
+
+        std::string windowTitle = "dizui Studio - " + m_currentProjectName + " [" + m_currentProjectFilePath + "]";
+        if (GLFWwindow *currentWin = glfwGetCurrentContext())
+        {
+            glfwSetWindowTitle(currentWin, windowTitle.c_str());
+        }
+
+        std::cout << "[dizui Info] Projet chargé (" << m_activeProject->datasets().size()
+                  << " datasets restaurés) : " << filePath << std::endl;
+        return true;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "[dizui Erreur] Échec du chargement : " << e.what() << std::endl;
+        return false;
+    }
+}
+
+void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
+{
+    // Pré-remplissage des champs de sauvegarde avec les métadonnées de la requête éditée
+    strncpy(m_saveQueryNameBuf, savedQuery.name.c_str(), sizeof(m_saveQueryNameBuf) - 1);
+    m_saveQueryNameBuf[sizeof(m_saveQueryNameBuf) - 1] = '\0';
+
+    strncpy(m_saveQueryDescBuf, savedQuery.description.c_str(), sizeof(m_saveQueryDescBuf) - 1);
+    m_saveQueryDescBuf[sizeof(m_saveQueryDescBuf) - 1] = '\0';
+
+    // 1. Nettoyage complet du canevas de requêtes
+    m_visualQueryNodes.clear();
+    m_visualQueryLinks.clear();
+    m_visualQueryPredicates.clear();
+    m_editingJoinLink = nullptr;
+    m_editingPredicate = nullptr;
+
+    if (savedQuery.visualState.is_null() || savedQuery.visualState.empty())
+    {
+        std::cout << "[dizui Info] Requête '" << savedQuery.name << "' sans graphe visuel associé." << std::endl;
+        return;
+    }
+
+    const auto &vState = savedQuery.visualState;
+
+    // 2. Restauration des nœuds de tables (Datasets)
+    if (vState.contains("nodes") && vState["nodes"].is_array())
+    {
+        for (const auto &nJson : vState["nodes"])
+        {
+            VisualQueryNode node;
+            node.id = nJson.value("id", uintptr_t(0));
+            node.datasetName = nJson.value("datasetName", "");
+            node.alias = nJson.value("alias", "");
+            node.position = ImVec2(nJson.value("x", 100.0f), nJson.value("y", 100.0f));
+            node.needsPositionInitialization = true;
+
+            if (nJson.contains("selectedColumns") && nJson["selectedColumns"].is_array())
+            {
+                for (const auto &colIdx : nJson["selectedColumns"])
+                {
+                    node.selectedColumns.insert(colIdx.get<size_t>());
+                }
+            }
+            m_visualQueryNodes.push_back(std::move(node));
+        }
+    }
+
+    // 3. Restauration des liens de jointures (VisualQueryLink)
+    if (vState.contains("links") && vState["links"].is_array())
+    {
+        ed::SetCurrentEditor(m_queryContext);
+        for (const auto &lJson : vState["links"])
+        {
+            VisualQueryLink link;
+            link.id = lJson.value("id", uintptr_t(0));
+            link.startPinId = lJson.value("startPinId", uintptr_t(0));
+            link.endPinId = lJson.value("endPinId", uintptr_t(0));
+            link.centralNodeId = lJson.value("centralNodeId", uintptr_t(0));
+            link.leftPinId = lJson.value("leftPinId", uintptr_t(0));
+            link.rightPinId = lJson.value("rightPinId", uintptr_t(0));
+            link.type = static_cast<cppsqlx::JoinType>(lJson.value("type", 0));
+            link.leftFieldName = lJson.value("leftFieldName", "");
+            link.rightFieldName = lJson.value("rightFieldName", "");
+            link.op = static_cast<cppsqlx::SQLOperator>(lJson.value("op", 0));
+
+            if (lJson.contains("joinX") && lJson.contains("joinY"))
+            {
+                ed::SetNodePosition(link.centralNodeId, ImVec2(lJson["joinX"].get<float>(), lJson["joinY"].get<float>()));
+            }
+
+            m_visualQueryLinks.push_back(std::move(link));
+        }
+        ed::SetCurrentEditor(nullptr);
+    }
+
+    // 4. Restauration des filtres (VisualQueryPredicate)
+    if (vState.contains("predicates") && vState["predicates"].is_array())
+    {
+        for (const auto &pJson : vState["predicates"])
+        {
+            VisualQueryPredicate pred;
+            pred.id = pJson.value("id", uintptr_t(0));
+            pred.position = ImVec2(pJson.value("x", 100.0f), pJson.value("y", 100.0f));
+            pred.needsPositionInitialization = true;
+            pred.inputPinId = pJson.value("inputPinId", uintptr_t(0));
+            pred.outputPinId = pJson.value("outputPinId", uintptr_t(0));
+            pred.targetColumn = pJson.value("targetColumn", "");
+            pred.op = static_cast<cppsqlx::SQLOperator>(pJson.value("op", 0));
+            pred.value = pJson.value("value", "");
+            pred.connectedSrcPinId = pJson.value("connectedSrcPinId", uintptr_t(0));
+
+            m_visualQueryPredicates.push_back(std::move(pred));
+        }
+    }
+
+    m_needsQueryCentering = true;
+
+    std::cout << "[dizui Info] Graphe visuel de '" << savedQuery.name << "' restauré." << std::endl;
+}
+
+void Application::loadWorkflowIntoVisualDesigner(const SavedWorkflow &savedWorkflow)
+{
+    m_workflowNodes.clear();
+    m_workflowLinks.clear();
+
+    strncpy(m_activeWorkflowNameBuf, savedWorkflow.name.c_str(), sizeof(m_activeWorkflowNameBuf) - 1);
+    m_activeWorkflowNameBuf[sizeof(m_activeWorkflowNameBuf) - 1] = '\0';
+
+    strncpy(m_activeWorkflowDescBuf, savedWorkflow.description.c_str(), sizeof(m_activeWorkflowDescBuf) - 1);
+    m_activeWorkflowDescBuf[sizeof(m_activeWorkflowDescBuf) - 1] = '\0';
+
+    if (!savedWorkflow.visualState.is_null() && !savedWorkflow.visualState.empty())
+    {
+        const auto &vs = savedWorkflow.visualState;
+        if (vs.contains("nodes") && vs["nodes"].is_array())
+        {
+            for (const auto &nJson : vs["nodes"])
+            {
+                m_workflowNodes.push_back(WorkflowJobNode{
+                    nJson.value("id", uintptr_t(0)),
+                    nJson.value("taskName", ""),
+                    ImVec2(nJson.value("x", 100.0f), nJson.value("y", 100.0f)),
+                    true,
+                    nJson.value("inputPinId", uintptr_t(0)),
+                    nJson.value("outputPinId", uintptr_t(0))});
+            }
+        }
+
+        if (vs.contains("links") && vs["links"].is_array())
+        {
+            for (const auto &lJson : vs["links"])
+            {
+                m_workflowLinks.push_back(WorkflowJobLink{
+                    lJson.value("id", uintptr_t(0)),
+                    lJson.value("startPinId", uintptr_t(0)),
+                    lJson.value("endPinId", uintptr_t(0))});
+            }
+        }
+    }
+
+    m_needsWorkflowCentering = true;
+}
+
+void Application::executeVisualQuery(const std::string &sql)
+{
+    m_queryResultRows.clear();
+    m_executionError = "";
+
+    if (sql.empty())
+    {
+        m_executionError = "Graphe vide ou impossible à compiler.";
+        return;
+    }
+
+    std::cout << "--------------------------------------------------------" << std::endl;
+    std::cout << "- REQUÊTE COMPILÉE SOUMISE À POSTGRESQL :" << std::endl;
+    std::cout << "--------------------------------------------------------" << std::endl;
+    std::cout << sql << std::endl;
+    std::cout << "--------------------------------------------------------" << std::endl;
+
+    try
+    {
+        if (m_activeProject && m_activeProject->logicalConnections().contains(m_selectedGateway))
+        {
+            const auto &gateway = m_activeProject->logicalConnections().at(m_selectedGateway);
+            if (gateway.environments().contains(m_selectedContext))
+            {
+                const auto &phys = gateway.environments().at(m_selectedContext);
+                std::string connStr = "dbname=" + phys.dbname_ + " user=" + phys.dbuser_ + " host=" + phys.dbhost_ + " port=" + std::to_string(phys.dbport_) + " sslmode=disable";
+
+                cppsqlx::Connection execConn(connStr);
+                auto connectRes = execConn.connect();
+
+                if (execConn.isConnected())
+                {
+                    std::unique_ptr<cppsqlx::Statement> stmt = execConn.createStatement();
+                    if (stmt)
+                    {
+                        auto rowsRes = stmt->execute(sql);
+                        if (rowsRes.has_value())
+                        {
+                            const auto &resultSet = rowsRes.value();
+                            for (const auto &row : resultSet)
+                            {
+                                std::vector<std::string> targetRow;
+                                for (size_t col_idx = 0; col_idx < m_queryResultHeaders.size(); ++col_idx)
+                                {
+                                    auto cellResult = row[col_idx];
+                                    targetRow.push_back(cellResult.value_or("NULL"));
+                                }
+                                m_queryResultRows.push_back(std::move(targetRow));
+                            }
+                        }
+                        else
+                        {
+                            m_executionError = rowsRes.error();
+                        }
+                    }
+                }
+                else
+                {
+                    m_executionError = "Impossible de se connecter à la base cible.";
+                }
+            }
+        }
+    }
+    catch (const std::exception &e)
+    {
+        m_executionError = std::string("Erreur SQL : ") + e.what();
+    }
+}
+
+void Application::launchWorkflowExecutionAsync(const std::string &logicalConnName, const std::string &envContext)
+{
+    if (m_isWorkflowRunning.load() || !m_activeProject)
+        return;
+
+    // 1. Récupération et assainissement de la passerelle logique
+    auto &gateways = m_activeProject->logicalConnections();
+    auto it = gateways.find(logicalConnName);
+    if (it == gateways.end())
+    {
+        std::cerr << "[dizui Erreur] Passerelle logique introuvable : '" << logicalConnName << "'" << std::endl;
+        return;
+    }
+
+    if (it->second.name().empty())
+    {
+        it->second.setName(logicalConnName);
+    }
+
+    // 2. Vérification de la présence d'une configuration physique pour l'environnement cible (DEV/TEST/PROD)
+    auto configCheck = it->second.getConfiguration(envContext);
+    if (!configCheck.has_value())
+    {
+        std::cerr << "[dizui Erreur] Impossible de lancer le workflow : " << configCheck.error() << std::endl;
+        return;
+    }
+
+    // 3. Compilation et validation du Workflow
+    std::string wfName(m_activeWorkflowNameBuf);
+    std::string wfJsonStr = compileWorkflowToJSON(wfName);
+    auto wfRes = cppsqlx::Workflow::fromJSON(nlohmann::json::parse(wfJsonStr));
+
+    if (!wfRes.has_value())
+    {
+        std::cerr << "[dizui Erreur] Impossible d'initialiser le Workflow : " << wfRes.error() << std::endl;
+        return;
+    }
+
+    // 1. Initialisation de tous les jobs en statut "En attente" (Bleu foncé par défaut)
+    {
+        std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
+        m_liveJobStatuses.clear();
+        m_liveJobMessages.clear();
+        for (const auto &node : m_workflowNodes)
+        {
+            m_liveJobStatuses[node.taskName] = VisualJobStatus::Idle;
+            m_liveJobMessages[node.taskName] = "En attente d'exécution";
+        }
+    }
+
+    m_isWorkflowRunning.store(true);
+    auto workflowPtr = std::make_shared<cppsqlx::Workflow>(std::move(wfRes.value()));
+
+    m_activeProject->resolveDependencies();
+    cppsqlx::LogicalConnection targetGateway = m_activeProject->logicalConnections().at(logicalConnName);
+
+    std::thread([this, workflowPtr, targetGateway, envContext]()
+                {
+        try
+        {
+            // Passage du callback temps réel à Workflow::run
+            workflowPtr->run(targetGateway, envContext, [this](const std::string& jobName, cppsqlx::JobStatus status, const std::string& msg) {
+                std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
+                m_liveJobMessages[jobName] = msg;
+
+                if (status == cppsqlx::JobStatus::Running)
+                    m_liveJobStatuses[jobName] = VisualJobStatus::Running;
+                else if (status == cppsqlx::JobStatus::Success)
+                    m_liveJobStatuses[jobName] = VisualJobStatus::Success;
+                else if (status == cppsqlx::JobStatus::Failed)
+                    m_liveJobStatuses[jobName] = VisualJobStatus::Failed;
+                else
+                    m_liveJobStatuses[jobName] = VisualJobStatus::Idle;
+            });
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[dizui Workflow Erreur] Exception critique : " << e.what() << std::endl;
+        }
+
+        m_isWorkflowRunning.store(false); })
+        .detach();
+}
+
 void Application::renderUI()
 {
-    // Configuration de l'environnement hôte global Dockspace
     ImGuiViewport *viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -55,12 +922,11 @@ void Application::renderUI()
     ImGui::PopStyleVar(3);
 
     ImGuiID dockspace_id = ImGui::GetID("DizuiMainDockSpace");
-    
-    // Initialisation automatique du Layout (Inversion Gauche / Centre / Droite)
+
     static bool init_layout = true;
-    if (init_layout && !ImGui::DockBuilderGetNode(dockspace_id)) {
+    if (init_layout && !ImGui::DockBuilderGetNode(dockspace_id))
+    {
         init_layout = false;
-        
         ImGui::DockBuilderRemoveNode(dockspace_id);
         ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
@@ -68,719 +934,2681 @@ void Application::renderUI()
         ImGuiID dock_main_id = dockspace_id;
         ImGuiID dock_left_id, dock_center_id;
 
-        // 1. Découper l'extrême gauche pour la Toolbar (0.05f)
-        dock_left_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.05f, nullptr, &dock_main_id);
-        ImGuiDockNode* left_node = ImGui::DockBuilderGetNode(dock_left_id);
-        if (left_node) {
+        dock_left_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.04f, nullptr, &dock_main_id);
+        ImGuiDockNode *left_node = ImGui::DockBuilderGetNode(dock_left_id);
+        if (left_node)
             left_node->LocalFlags |= ImGuiDockNodeFlags_NoTabBar | static_cast<int>(ImGuiDockNodeFlags_NoResize);
-        }
 
-        // 2. Découper le reste depuis la gauche pour le Panneau de Contrôle (0.25f)
         dock_center_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.25f, nullptr, &dock_main_id);
-        ImGuiDockNode* center_node = ImGui::DockBuilderGetNode(dock_center_id);
-        if (center_node) {
+        ImGuiDockNode *center_node = ImGui::DockBuilderGetNode(dock_center_id);
+        if (center_node)
             center_node->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
-        }
 
-        // --- NOUVEAU : Masquer la TabBar également sur la zone Workspace restante à droite ---
-        ImGuiDockNode* main_node = ImGui::DockBuilderGetNode(dock_main_id);
-        if (main_node) {
+        ImGuiID dock_bottom_result_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Down, 0.333f, nullptr, &dock_main_id);
+        std::ignore = dock_bottom_result_id;
+
+        ImGuiDockNode *main_node = ImGui::DockBuilderGetNode(dock_main_id);
+        if (main_node)
             main_node->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
-        }
 
-        // Assigner les fenêtres aux emplacements fixes
         ImGui::DockBuilderDockWindow("Outils", dock_left_id);
         ImGui::DockBuilderDockWindow("Panneau de Contrôle", dock_center_id);
-        ImGui::DockBuilderDockWindow("Espace de Travail (Canevas)", dock_main_id); // Toujours le même nom de fenêtre
-        
+        ImGui::DockBuilderDockWindow("Espace de Travail (Canevas)", dock_main_id);
+
         ImGui::DockBuilderFinish(dockspace_id);
     }
-
 
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
     ImGui::End();
 
-    // =========================================================================
-    // 1. Barre de Titre / Menu Principal
-    // =========================================================================
+    // 1. Dessin de la barre supérieure (Menu Bar principal)
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 10.0f));
-
-    if (ImGui::BeginMainMenuBar()) {
-        
+    if (ImGui::BeginMainMenuBar())
+    {
         ImGui::Spacing();
-        // Icône Logo de l'application
         ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s", ICON_LC_CPU);
         ImGui::Spacing();
-
-        // ---------------------------------------------------------------------
-        // MENU : File
-        // ---------------------------------------------------------------------
-        if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem("New Project", "Ctrl+N")) { m_currentTab = ActiveTab::Project; }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Open Project...", "Ctrl+O")) { m_currentTab = ActiveTab::Project; }
-            if (ImGui::MenuItem("Close Project", "Ctrl+W")) {}
-            ImGui::Separator();
-            if (ImGui::MenuItem("Save", "Ctrl+S")) {}
-            if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S")) {}
-            ImGui::Separator();
-            if (ImGui::MenuItem("Preferences...", "Ctrl+P")) { m_currentTab = ActiveTab::Settings; }
-            ImGui::Separator();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.3f, 0.3f, 1.0f));
-            if (ImGui::MenuItem("Delete Project", "")) {}
-            ImGui::PopStyleColor();
-            ImGui::Separator();
-            if (ImGui::MenuItem("Exit", "Alt+F4")) {
-                glfwSetWindowShouldClose(m_windowManager->getNativeWindow(), GLFW_TRUE);
+        if (ImGui::BeginMenu("File"))
+        {
+            if (ImGui::MenuItem("Ouvrir...", "Ctrl+O"))
+            {
+                if (!m_currentProjectFilePath.empty())
+                {
+                    m_browserCurrentDir = std::filesystem::path(m_currentProjectFilePath).parent_path();
+                }
+                else
+                {
+                    m_browserCurrentDir = std::filesystem::current_path();
+                }
+                memset(m_projectFileNameBuf, 0, sizeof(m_projectFileNameBuf));
+                m_showOpenProjectModal = true;
             }
+
+            ImGui::Separator();
+            // ENREGISTRER : Sauvegarde directe si un chemin existe déjà, sinon bascule sur "Enregistrer sous"
+            if (ImGui::MenuItem("Enregistrer", "Ctrl+S"))
+            {
+                if (!m_currentProjectFilePath.empty())
+                {
+                    saveProjectToFile(m_currentProjectFilePath);
+                }
+                else
+                {
+                    m_showSaveProjectAsModal = true;
+                }
+            }
+
+            // ENREGISTRER SOUS : Ouvre systématiquement la modale de choix de fichier
+            if (ImGui::MenuItem("Enregistrer sous...", "Ctrl+Shift+S"))
+            {
+                if (!m_currentProjectFilePath.empty())
+                {
+                    std::filesystem::path p(m_currentProjectFilePath);
+                    m_browserCurrentDir = p.parent_path();
+                    strncpy(m_projectFileNameBuf, p.filename().string().c_str(), sizeof(m_projectFileNameBuf) - 1);
+                }
+                else
+                {
+                    m_browserCurrentDir = std::filesystem::current_path();
+                }
+                m_showNewFolderInput = false;
+                m_showSaveProjectAsModal = true;
+            }
+
             ImGui::EndMenu();
         }
-
-        // ---------------------------------------------------------------------
-        // MENU : Edit (Nouveau)
-        // ---------------------------------------------------------------------
-        if (ImGui::BeginMenu("Edit")) {
-            if (ImGui::MenuItem("Undo", "Ctrl+Z")) {
-                // TODO: Logique d'annulation pour le graphe
-            }
-            if (ImGui::MenuItem("Redo", "Ctrl+Y")) {
-                // TODO: Logique de rétablissement
-            }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Cut", "Ctrl+X")) {}
-            if (ImGui::MenuItem("Copy", "Ctrl+C")) {}
-            if (ImGui::MenuItem("Paste", "Ctrl+V")) {}
-            ImGui::Separator();
-            if (ImGui::MenuItem("Select All", "Ctrl+A")) {}
-            if (ImGui::MenuItem("Clear Canvas", "Delete")) {
-                // TODO: Logique pour vider tous les nœuds
-            }
+        if (ImGui::BeginMenu("Edit"))
             ImGui::EndMenu();
+        if (ImGui::BeginMenu("View"))
+            ImGui::EndMenu();
+        if (ImGui::BeginMenu("Help"))
+            ImGui::EndMenu();
+
+        if (m_activeProject)
+        {
+            ImGui::SameLine();
+            ImGui::Separator();
+            ImGui::SameLine();
+            ImGui::Dummy(ImVec2(20.0f, 0.0f));
+            ImGuiIO &io = ImGui::GetIO();
+            ImFont *small_font_ptr = (io.Fonts->Fonts.Size > 1) ? io.Fonts->Fonts[0] : nullptr;
+
+            ImGui::SameLine();
+            ImGui::TextDisabled("Connexion :");
+            ImGui::SameLine();
+            ImGui::Dummy(ImVec2(4.0f, 0.0f));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(250.0f);
+
+            if (m_selectedGateway.empty() && !m_activeProject->logicalConnections().empty())
+                m_selectedGateway = m_activeProject->logicalConnections().begin()->first;
+
+            if (small_font_ptr)
+                ImGui::PushFont(small_font_ptr);
+            if (ImGui::BeginCombo("##GatewayCombo", m_selectedGateway.empty() ? "Connexion..." : m_selectedGateway.c_str()))
+            {
+                for (const auto &[name, logConn] : m_activeProject->logicalConnections())
+                {
+                    if (ImGui::Selectable(name.c_str(), m_selectedGateway == name))
+                    {
+                        m_selectedGateway = name;
+                        m_selectedContext = "";
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (small_font_ptr)
+                ImGui::PopFont();
+
+            ImGui::SameLine();
+            ImGui::Dummy(ImVec2(15.0f, 0.0f));
+            ImGui::SameLine();
+            ImGui::TextDisabled("Contexte :");
+            ImGui::SameLine();
+            ImGui::Dummy(ImVec2(4.0f, 0.0f));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f);
+
+            std::vector<std::string> available_contexts;
+            if (m_activeProject->logicalConnections().contains(m_selectedGateway))
+            {
+                const auto &currentGateway = m_activeProject->logicalConnections().at(m_selectedGateway);
+                for (const auto &[envName, physConn] : currentGateway.environments())
+                    available_contexts.push_back(envName);
+                if (m_selectedContext.empty() && !available_contexts.empty())
+                    m_selectedContext = available_contexts.front();
+            }
+
+            if (small_font_ptr)
+                ImGui::PushFont(small_font_ptr);
+            if (ImGui::BeginCombo("##ContextCombo", m_selectedContext.empty() ? "Contexte..." : m_selectedContext.c_str()))
+            {
+                for (const auto &envName : available_contexts)
+                {
+                    if (ImGui::Selectable(envName.c_str(), m_selectedContext == envName))
+                        m_selectedContext = envName;
+                }
+                ImGui::EndCombo();
+            }
+            if (small_font_ptr)
+                ImGui::PopFont();
         }
 
-        // ---------------------------------------------------------------------
-        // MENU : View (Nouveau)
-        // ---------------------------------------------------------------------
-        if (ImGui::BeginMenu("View")) {
-            // Options pour basculer rapidement d'onglet depuis le menu
-            if (ImGui::MenuItem("Show Project Workspace", "Alt+1"))   { m_currentTab = ActiveTab::Project; }
-            if (ImGui::MenuItem("Show Search Panel", "Alt+2"))        { m_currentTab = ActiveTab::Search; }
-            if (ImGui::MenuItem("Show Source Control", "Alt+3"))      { m_currentTab = ActiveTab::Git; }
-            if (ImGui::MenuItem("Show Package Manager", "Alt+4"))     { m_currentTab = ActiveTab::Package; }
-            if (ImGui::MenuItem("Show Settings", "Alt+5"))            { m_currentTab = ActiveTab::Settings; }
-            
-            ImGui::Separator();
-            
-            // Flags d'affichage pour le canevas de nœuds
-            static bool show_grid = true;
-            if (ImGui::MenuItem("Grid background", nullptr, &show_grid)) {
-                // TODO: Transmettre l'état au imgui-node-editor
-            }
-            
-            static bool show_fps = false;
-            ImGui::MenuItem("Show Performance Overlay", nullptr, &show_fps);
-            ImGui::EndMenu();
-        }
-
-        // ---------------------------------------------------------------------
-        // MENU : Help (Nouveau)
-        // ---------------------------------------------------------------------
-        if (ImGui::BeginMenu("Help")) {
-            if (ImGui::MenuItem("Documentation", "F1")) {
-                // Logique pour ouvrir une URL ou un panneau d'aide
-            }
-            if (ImGui::MenuItem("Keyboard Shortcuts", "Ctrl+?")) {}
-            ImGui::Separator();
-            
-            static bool show_about_popup = false;
-            if (ImGui::MenuItem("About dizui...", nullptr)) {
-                show_about_popup = true;
-            }
-            
-            // Fenêtre modale "À propos" déclenchée par le menu
-            if (show_about_popup) {
-                ImGui::OpenPopup("About Dizui");
-            }
-            
-            ImGui::EndMenu();
-        }
-        
-        // Alignement des informations à droite
         float text_width = ImGui::CalcTextSize("dizui v1.0").x;
         ImGui::SameLine(ImGui::GetWindowWidth() - text_width - 20.0f);
         ImGui::TextDisabled("dizui v1.0");
-
         ImGui::EndMainMenuBar();
     }
-
-    // Gestion de la modale "À propos" en dehors du bloc de la barre de menus
-    if (ImGui::BeginPopupModal("About Dizui", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("dizui — Workspace de Graphes C++20");
-        ImGui::Separator();
-        ImGui::Text("Version : 1.0.0");
-        ImGui::Text("Environnement : Linux (Wayland Native)");
-        ImGui::Text("Moteurs : ImGui Docking & Lucide Vector Icons");
-        ImGui::Spacing();
-        if (ImGui::Button("Fermer", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
-        ImGui::EndPopup();
-    }
-
     ImGui::PopStyleVar();
 
+    // DES SOUS-SYSTÈMES GRAPHIOQUES
+    renderLeftSidebar();
+    renderMainContentZone();
+    renderGlobalModals();
+}
 
 
-    // =========================================================================
-    // 2. Barre d'outils verticale (Gauche)
-    // =========================================================================
-    ImGuiWindowFlags toolbar_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove;
-    ImGui::Begin("Outils", nullptr, toolbar_flags);
-    
-    // Style de base des boutons (Transparent au repos, gris clair au survol)
+void Application::renderLeftSidebar()
+{
+    renderActivityBar();
+    renderProjectExplorerTree();
+}
+
+void Application::renderActivityBar()
+{
+    ImGuiWindowFlags toolbar_flags_local = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove;
+    ImGui::Begin("Outils", nullptr, toolbar_flags_local);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.25f, 0.25f, 0.40f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.35f, 0.35f, 0.35f, 0.60f));
 
-    // --- Fonction utilitaire locale pour dessiner un bouton avec état Actif ---
-    auto drawToolbarButton = [&](const char* icon, const char* tooltip, ActiveTab tabTarget) {
-        bool is_active = (m_currentTab == tabTarget);
-        if (is_active) {
-            // Si le bouton correspond à l'onglet actif, on lui applique un fond gris fixe
+    auto drawToolbarButtonLocal = [&](const char *icon, const char *tooltip, ActiveTab tabTarget)
+    {
+        if (m_currentTab == tabTarget)
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.20f, 0.20f, 0.80f));
-        } else {
-            // Sinon fond transparent
+        else
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-        }
 
-        if (ImGui::Button(icon, ImVec2(48, 48))) {
-            m_currentTab = tabTarget; // Change l'état de l'application
+        if (ImGui::Button(icon, ImVec2(48, 48)))
+        {
+            m_currentTab = tabTarget;
         }
         ImGui::SetItemTooltip("%s", tooltip);
-
-        ImGui::PopStyleColor(); // Restaure la couleur de fond du bouton
+        ImGui::PopStyleColor();
     };
 
-    // Bouton 1: Project
-    drawToolbarButton(ICON_LC_BLOCKS, "Project workspace", ActiveTab::Project);
+    drawToolbarButtonLocal(ICON_LC_BLOCKS, "Project workspace", ActiveTab::Project);
     ImGui::Spacing();
-
-    // Bouton 2: Recherche
-    drawToolbarButton(ICON_LC_SEARCH, "Rechercher dans le Graphe", ActiveTab::Search);
+    drawToolbarButtonLocal(ICON_LC_SEARCH, "Rechercher dans le Graphe", ActiveTab::Search);
     ImGui::Spacing();
-
-    // Bouton 3: Git
-    drawToolbarButton(ICON_LC_GIT_BRANCH, "Gérer les sources", ActiveTab::Git);
+    drawToolbarButtonLocal(ICON_LC_GIT_BRANCH, "Gérer les sources", ActiveTab::Git);
     ImGui::Spacing();
-
-    // Bouton 4: Package
-    drawToolbarButton(ICON_LC_BOX, "Gestion package", ActiveTab::Package);
+    drawToolbarButtonLocal(ICON_LC_BOX, "Gestion package", ActiveTab::Package);
     ImGui::Spacing();
-
-    // Bouton 5: Paramètres
-    drawToolbarButton(ICON_LC_SETTINGS, "Paramètres de l'application", ActiveTab::Settings);
-
-    ImGui::PopStyleColor(2); // Restaure Hovered et Active généraux
+    drawToolbarButtonLocal(ICON_LC_SETTINGS, "Paramètres de l'application", ActiveTab::Settings);
+    ImGui::PopStyleColor(2);
     ImGui::End();
+}
 
-    // =========================================================================
-    // 3. Panneau de Contrôle Vertical (Milieu - Dynamique)
-    // =========================================================================
-    ImGuiWindowFlags panel_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse;
-    ImGui::Begin("Panneau de Contrôle", nullptr, panel_flags);
+void Application::renderProjectExplorerTree()
+{
+    ImGuiWindowFlags panel_flags_local = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse;
+    ImGui::Begin("Panneau de Contrôle", nullptr, panel_flags_local);
 
-    // --- FONCTION UTILITAIRE : Dessiner une icône à taille personnalisée ---
-    // Cette fonction réserve l'espace, calcule la position et dessine l'icône à la taille demandée
-    // --- FONCTION UTILITAIRE CORRIGÉE : Dessiner une icône à taille personnalisée ---
-    auto drawLargeIconText = [](const char* icon, const char* label, float icon_size) {
-        ImGuiWindow* window = ImGui::GetCurrentWindow();
-        if (window->SkipItems) return;
-
-        ImGuiContext& g = *GImGui;
-        
-        // 1. Déterminer la police courante
-        ImFont* font = g.Font; 
-
-        // 2. Calculer l'espace nécessaire pour l'icône agrandie
+    auto drawLargeIconText = [](const char *icon, const char *label, float icon_size)
+    {
+        ImGuiWindow *window = ImGui::GetCurrentWindow();
+        if (window->SkipItems)
+            return;
+        ImGuiContext &g = *GImGui;
+        ImFont *font = g.Font;
         ImVec2 padding(8.0f, 4.0f);
         float line_height = ImMax(icon_size, ImGui::GetTextLineHeight());
         ImVec2 size(icon_size + padding.x * 2.0f, line_height);
-        
-        // CORRECTION : Calcul manuel des coordonnées vectorielles sans surcharger l'opérateur +
         ImVec2 pos_max(window->DC.CursorPos.x + size.x, window->DC.CursorPos.y + size.y);
         ImRect bb(window->DC.CursorPos, pos_max);
-        
         ImGui::ItemSize(size, g.Style.FramePadding.y);
-        if (!ImGui::ItemAdd(bb, 0)) return;
-
-        // 3. Dessiner l'icône directement dans la liste de rendu à la taille 'icon_size'
-        // CORRECTION : Addition manuelle composante par composante
+        if (!ImGui::ItemAdd(bb, 0))
+            return;
         ImVec2 icon_pos(bb.Min.x + padding.x, bb.Min.y + padding.y);
         icon_pos.y += (line_height - icon_size) * 0.5f;
-
         window->DrawList->AddText(font, icon_size, icon_pos, ImGui::GetColorU32(ImGuiCol_Text), icon);
-
-        // 4. Placer le texte normal juste à côté sur la même ligne
         ImGui::SameLine(0.0f, g.Style.ItemSpacing.x);
-        
-        // CORRECTION : Remplacement par les vraies fonctions Y d'ImGui
         float current_y = ImGui::GetCursorPosY();
-        float offset_y = (line_height - ImGui::GetTextLineHeight()) * 0.5f;
-        ImGui::SetCursorPosY(current_y + offset_y);
-        
+        ImGui::SetCursorPosY(current_y + (line_height - ImGui::GetTextLineHeight()) * 0.5f);
         ImGui::Text("%s", label);
-        
-        // Réaligner le curseur pour la ligne suivante
         ImGui::SetCursorPosY(current_y + line_height + g.Style.ItemSpacing.y);
+        ImGui::Dummy(ImVec2(0.0f, 0.0f));
     };
 
-
-    // --- APPLICATION DANS LE SWITCH CASE ---
-    switch (m_currentTab) 
+    switch (m_currentTab)
     {
-        case ActiveTab::Project:
-            ImGui::TextDisabled("ONGLET");
-            
-            // Icône dessinée à 32 pixels de hauteur, le texte reste à la taille par défaut (18px)
-            drawLargeIconText(ICON_LC_BLOCKS, "Espace Projet", 14.0f);
-            
-            ImGui::Separator();
-            ImGui::Spacing();
-            if (ImGui::TreeNode("dizui_project")) {
-                ImGui::Text("📄 main.cpp");
-                ImGui::Text("📄 Application.cpp");
+    case ActiveTab::Project:
+        drawLargeIconText(ICON_LC_BLOCKS, "Espace Projet", 14.0f);
+        ImGui::Separator();
+        ImGui::Spacing();
+        if (m_activeProject)
+        {
+            std::string project_root_label = std::string(ICON_LC_LAYOUT_GRID) + "  " + m_activeProject->name() + "###ProjectRootNode";
+            ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+            if (ImGui::TreeNode(project_root_label.c_str()))
+            {
+                drawLargeIconText(ICON_LC_FOLDER_OPEN, ("Chemin : " + m_activeProject->path()).c_str(), 14.0f);
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // 1. Connexions Physiques
+                if (ImGui::TreeNode("Connexions Physiques"))
+                {
+                    for (const auto &[name, physConn] : m_activeProject->physicalConnections())
+                    {
+                        drawLargeIconText(ICON_LC_SERVER, (name + " (" + physConn.dbname_ + ")").c_str(), 12.0f);
+                    }
+                    ImGui::TreePop();
+                }
+
+                // 2. Passerelles Logiques
+                if (ImGui::TreeNode("Passerelles Logiques"))
+                {
+                    for (const auto &[name, logConn] : m_activeProject->logicalConnections())
+                    {
+                        if (ImGui::TreeNode(name.c_str()))
+                        {
+                            for (const auto &[envName, physConn] : logConn.environments())
+                            {
+                                if (ImGui::TreeNode(envName.c_str()))
+                                {
+                                    drawLargeIconText(ICON_LC_SERVER, ("Cluster : " + physConn.name_).c_str(), 12.0f);
+                                    drawLargeIconText(ICON_LC_DATABASE, ("Base    : " + physConn.dbname_).c_str(), 12.0f);
+                                    ImGui::TreePop();
+                                }
+                            }
+                            ImGui::TreePop();
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+
+                // 3. Datasets (Tables)
+                ImGui::PushID("DatasetsHeaderNode");
+                bool datasets_open = ImGui::TreeNode("Datasets (Tables)");
+                if (ImGui::BeginPopupContextItem("DatasetsContextMenu", ImGuiPopupFlags_MouseButtonRight))
+                {
+                    if (ImGui::Selectable((std::string(ICON_LC_REFRESH_CW) + "  Reverse Datasets...").c_str()))
+                    {
+                        m_showReverseModal = true;
+                        m_reverseSelectedObject = "";
+                        m_cachedSchemas.clear();
+                    }
+                    ImGui::EndPopup();
+                }
+                if (datasets_open)
+                {
+                    for (const auto &[name, dataset] : m_activeProject->datasets())
+                    {
+                        ImGui::PushID(name.c_str());
+                        if (ImGui::Selectable(("##select_" + name).c_str(), false, ImGuiSelectableFlags_AllowOverlap, ImVec2(0, ImGui::GetTextLineHeightWithSpacing())))
+                        {
+                            m_reverseSelectedObject = name;
+                        }
+                        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                        {
+                            ImGui::SetDragDropPayload("DND_DATASET_NODE", name.c_str(), name.size() + 1);
+                            drawLargeIconText(ICON_LC_TABLE, name.c_str(), 12.0f);
+                            ImGui::EndDragDropSource();
+                        }
+                        ImGui::SetCursorScreenPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMin().y));
+                        drawLargeIconText(ICON_LC_TABLE, name.c_str(), 12.0f);
+                        ImGui::PopID();
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+
+                // 4. Opérateurs de flux
+                if (ImGui::TreeNode("Opérateurs de flux"))
+                {
+                    ImGui::PushID("FilterDragRow");
+                    ImGui::Selectable("##select_filter_node", false, ImGuiSelectableFlags_AllowOverlap, ImVec2(0, ImGui::GetTextLineHeightWithSpacing()));
+                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                    {
+                        std::string payload_type = "WHERE_FILTER";
+                        ImGui::SetDragDropPayload("DND_PREDICATE_NODE", payload_type.c_str(), payload_type.size() + 1);
+                        drawLargeIconText(ICON_LC_FILTER, "Filtre (Clause WHERE)", 12.0f);
+                        ImGui::EndDragDropSource();
+                    }
+                    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMin().y));
+                    drawLargeIconText(ICON_LC_FILTER, "Filtre (Clause WHERE)", 12.0f);
+                    ImGui::PopID();
+                    ImGui::TreePop();
+                }
+
+                // 5. Requêtes Enregistrées
+                if (ImGui::TreeNode("Requêtes Enregistrées"))
+                {
+                    if (m_savedQueries.empty())
+                    {
+                        ImGui::TextDisabled("   (Aucune requête)");
+                    }
+                    else
+                    {
+                        int queryIndexToDelete = -1;
+                        int totalQueries = (int)m_savedQueries.size();
+
+                        for (int i = 0; i < totalQueries; ++i)
+                        {
+                            auto &saved = m_savedQueries[i];
+                            ImGui::PushID(i);
+
+                            if (ImGui::Selectable("##QueryRow", false, ImGuiSelectableFlags_AllowDoubleClick))
+                            {
+                                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                                    loadQueryIntoVisualDesigner(saved);
+                            }
+
+                            if (ImGui::BeginPopupContextItem("QueryContextMenu"))
+                            {
+                                if (ImGui::MenuItem("Éditer dans le designer"))
+                                    loadQueryIntoVisualDesigner(saved);
+
+                                if (ImGui::MenuItem("Renommer"))
+                                {
+                                    m_renamingQueryIndex = i;
+                                    strncpy(m_renameQueryBuf, saved.name.c_str(), sizeof(m_renameQueryBuf) - 1);
+                                    m_renameQueryBuf[sizeof(m_renameQueryBuf) - 1] = '\0';
+                                    m_showRenameQueryModal = true;
+                                }
+
+                                ImGui::Separator();
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+                                if (ImGui::MenuItem("Supprimer du projet"))
+                                    queryIndexToDelete = i;
+                                ImGui::PopStyleColor();
+                                ImGui::EndPopup();
+                            }
+                            if (ImGui::IsItemHovered())
+                            {
+                                if (!saved.description.empty())
+                                    ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options\n%s", saved.description.c_str());
+                                else
+                                    ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options");
+                            }
+                            ImGui::SameLine(0.0f, 0.0f);
+                            drawLargeIconText(ICON_LC_FILE_TEXT, saved.name.c_str(), 12.0f);
+                            ImGui::PopID();
+                        }
+                        if (queryIndexToDelete >= 0)
+                            m_savedQueries.erase(m_savedQueries.begin() + queryIndexToDelete);
+                    }
+                    ImGui::TreePop();
+                }
+                // 6. Tâches (Pipelines)
+                ImGui::PushID("TasksHeaderNode");
+                bool tasks_open = ImGui::TreeNode("Tâches (Pipelines)");
+                if (ImGui::BeginPopupContextItem("TasksContextMenu", ImGuiPopupFlags_MouseButtonRight))
+                {
+                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  Nouvelle tâche...").c_str()))
+                    {
+                        m_showCreateTaskModal = true;
+                        m_selectedQueryIndexForTask = -1;
+                        m_selectedTargetTypeIndex = 0;
+                        memset(m_newTaskNameBuf, 0, sizeof(m_newTaskNameBuf));
+                        memset(m_newTaskStepNameBuf, 0, sizeof(m_newTaskStepNameBuf));
+                    }
+                    ImGui::EndPopup();
+                }
+                if (tasks_open)
+                {
+                    if (m_savedTasks.empty())
+                    {
+                        ImGui::TextDisabled("   (Aucune tâche créée)");
+                    }
+                    else
+                    {
+                        for (const auto &task : m_savedTasks)
+                        {
+                            ImGui::PushID(task.name().c_str());
+                            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
+                            std::string row_label = std::string(ICON_LC_ACTIVITY) + "  " + task.name();
+                            bool is_selected = false;
+                            ImGui::Selectable(row_label.c_str(), &is_selected, ImGuiSelectableFlags_None, ImVec2(0.0f, 22.0f));
+                            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                            {
+                                ImGui::SetDragDropPayload("DND_WORKFLOW_TASK_NODE", task.name().c_str(), task.name().length() + 1);
+                                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "%s  Planifier : %s", ICON_LC_ACTIVITY, task.name().c_str());
+                                ImGui::EndDragDropSource();
+                            }
+                            if (ImGui::IsItemHovered())
+                            {
+                                std::string tooltip_txt = "Pipeline : " + task.name() + "\nÉtapes séquentielles :";
+                                if (task.steps().empty())
+                                    tooltip_txt += "\n   (Aucune étape)";
+                                else
+                                {
+                                    for (const auto &[stepId, unit] : task.steps())
+                                        tooltip_txt += "\n   [Step " + std::to_string(stepId) + "] -> " + unit.name;
+                                }
+                                ImGui::SetItemTooltip("%s", tooltip_txt.c_str());
+                            }
+                            ImGui::PopID();
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+                // 7. Registre des Jobs
+                if (ImGui::TreeNode("Registre des Jobs"))
+                {
+                    ImGui::TreePop();
+                }
+                // 8. Workflows Enregistrés
+                if (ImGui::TreeNode("Workflows Enregistrés###SavedWorkflowsTreeNode"))
+                {
+                    if (m_savedWorkflows.empty())
+                    {
+                        ImGui::TextDisabled("   (Aucun workflow)");
+                    }
+                    else
+                    {
+                        int workflowIndexToDelete = -1;
+                        int totalWorkflows = (int)m_savedWorkflows.size();
+                        for (int i = 0; i < totalWorkflows; ++i)
+                        {
+                            auto &wf = m_savedWorkflows[i];
+                            ImGui::PushID(i);
+                            if (ImGui::Selectable("##WorkflowRow", false, ImGuiSelectableFlags_AllowDoubleClick))
+                            {
+                                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                                    loadWorkflowIntoVisualDesigner(wf);
+                            }
+                            if (ImGui::BeginPopupContextItem("WorkflowContextMenu"))
+                            {
+                                if (ImGui::MenuItem("Éditer dans le designer"))
+                                    loadWorkflowIntoVisualDesigner(wf);
+                                if (ImGui::MenuItem("Renommer"))
+                                {
+                                    m_renamingWorkflowIndex = i;
+                                    strncpy(m_renameWorkflowBuf, wf.name.c_str(), sizeof(m_renameWorkflowBuf) - 1);
+                                    m_renameWorkflowBuf[sizeof(m_renameWorkflowBuf) - 1] = '\0';
+                                    m_showRenameWorkflowModal = true;
+                                }
+                                ImGui::Separator();
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+                                if (ImGui::MenuItem("Supprimer du projet"))
+                                    workflowIndexToDelete = i;
+                                ImGui::PopStyleColor();
+                                ImGui::EndPopup();
+                            }
+                            if (ImGui::IsItemHovered())
+                            {
+                                if (!wf.description.empty())
+                                    ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options\n%s", wf.description.c_str());
+                                else
+                                    ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options");
+                            }
+                            ImGui::SameLine(0.0f, 0.0f);
+                            drawLargeIconText(ICON_LC_ACTIVITY, wf.name.c_str(), 12.0f);
+                            ImGui::PopID();
+                        }
+                        if (workflowIndexToDelete >= 0)
+                            m_savedWorkflows.erase(m_savedWorkflows.begin() + workflowIndexToDelete);
+                    }
+                    ImGui::TreePop();
+                }
                 ImGui::TreePop();
             }
-            break;
-
-        case ActiveTab::Search:
-            ImGui::TextDisabled("ONGLET");
-            
-            // Icône dessinée encore plus grande (40 pixels de hauteur)
-            drawLargeIconText(ICON_LC_SEARCH, "Recherche Avancée", 14.0f);
-            
-            ImGui::Separator();
-            ImGui::Spacing();
-            static char search_buffer[128] = "";
-            ImGui::InputText("Filtrer les nœuds", search_buffer, IM_ARRAYSIZE(search_buffer));
-            break;
-
-        case ActiveTab::Git:
-            ImGui::TextDisabled("ONGLET");
-            drawLargeIconText(ICON_LC_GIT_BRANCH, "Gestion des Sources", 14.0f);
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::Text("Branche active : main");
-            break;
-
-        case ActiveTab::Package:
-            ImGui::TextDisabled("ONGLET");
-            drawLargeIconText(ICON_LC_BOX, "Gestionnaire de Packages", 14.0f);
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::Text("Bibliothèques liées :");
-            break;
-
-        case ActiveTab::Settings:
-            ImGui::TextDisabled("ONGLET");
-            drawLargeIconText(ICON_LC_SETTINGS, "Paramètres de l'Application", 14.0f);
-            ImGui::Separator();
-            ImGui::Spacing();
-            static float scale = 1.0f;
-            ImGui::SliderFloat("Échelle Canvas", &scale, 0.5f, 2.0f);
-            break;
+        }
+        break;
+    case ActiveTab::Search:
+        drawLargeIconText(ICON_LC_SEARCH, "Recherche Avancée", 14.0f);
+        break;
+    case ActiveTab::Git:
+        drawLargeIconText(ICON_LC_GIT_BRANCH, "Gestion des Sources", 14.0f);
+        break;
+    case ActiveTab::Package:
+        drawLargeIconText(ICON_LC_BOX, "Gestionnaire de Packages", 14.0f);
+        break;
+    case ActiveTab::Settings:
+        drawLargeIconText(ICON_LC_SETTINGS, "Paramètres de l'Application", 14.0f);
+        break;
     }
-
     ImGui::End();
+}
 
-
-
-
-    // 4. Barre de Statut (Bas de page fixe)
-    ImGuiViewport *main_vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(main_vp->Pos.x, main_vp->Pos.y + main_vp->Size.y - 25.0f));
-    ImGui::SetNextWindowSize(ImVec2(main_vp->Size.x, 25.0f));
-    ImGuiWindowFlags status_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoMove;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 2.0f));
-    ImGui::Begin("BarreDeStatut", nullptr, status_flags);
-    ImGui::Text("Statut: Prêt | Moteur: OpenGL Core | ImGui Docking OK | FPS: %.1f", ImGui::GetIO().Framerate);
-    ImGui::End();
-    ImGui::PopStyleVar();
-
-     // =========================================================================
-    // 5. Zone Workspace (Droite - Alignement Plat des 3 Designers Majeurs)
-    // =========================================================================
-    ImGuiWindowFlags workspace_flags = ImGuiWindowFlags_NoTitleBar | 
-                                       ImGuiWindowFlags_NoCollapse | 
-                                       ImGuiWindowFlags_NoScrollbar;
-                                         
+void Application::renderMainContentZone()
+{
+    ImGuiWindowFlags workspace_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove;
     ImGui::Begin("Espace de Travail (Canevas)", nullptr, workspace_flags);
 
-    // Forcer le masquage de l'onglet bleu parent du Dockspace global
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
-    if (window && window->DockNode) {
-        window->DockNode->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
-    }
+    ImGuiWindow *current_win = ImGui::GetCurrentWindow();
+    if (current_win && current_win->DockNode)
+        current_win->DockNode->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
 
-    // Une seule barre d'onglets principale contenant nos 3 outils alignés
     if (ImGui::BeginTabBar("DesignerTabBar", ImGuiTabBarFlags_None))
     {
-        // ---------------------------------------------------------------------
-        // DESIGNER 1 : WORKFLOW DESIGNER (Graphe de flux)
-        // ---------------------------------------------------------------------
-        std::string workflow_title = std::string(ICON_LC_ACTIVITY) + "  Workflow Designer";
-        if (ImGui::BeginTabItem(workflow_title.c_str()))
+        if (ImGui::BeginTabItem((std::string(ICON_LC_ACTIVITY) + "  Workflow Designer").c_str()))
         {
-            renderWorkflowEditor(); 
+            renderWorkflowEditor();
             ImGui::EndTabItem();
         }
-
-        // ---------------------------------------------------------------------
-        // DESIGNER 2 : QUERY VISUAL DESIGNER (Graphe de requêtage)
-        // ---------------------------------------------------------------------
-        std::string query_vis_title = std::string(ICON_LC_SEARCH) + "  Query Visual Designer";
-        if (ImGui::BeginTabItem(query_vis_title.c_str()))
+        if (ImGui::BeginTabItem((std::string(ICON_LC_SEARCH) + "  Query Visual Designer").c_str()))
         {
-            renderQueryEditor(); 
+            renderQueryEditor();
             ImGui::EndTabItem();
         }
-
-        // ---------------------------------------------------------------------
-        // DESIGNER 3 : QUERY TEXT EDITOR (Avec Splitter Interactif)
-        // ---------------------------------------------------------------------
-        std::string query_text_title = std::string(ICON_LC_BOX) + "  Query Text Editor";
-        if (ImGui::BeginTabItem(query_text_title.c_str()))
+        if (ImGui::BeginTabItem((std::string(ICON_LC_BOX) + "  Query Text Editor").c_str()))
         {
-            ImGui::Spacing();
-            
-            // 1. Enregistrer la position de départ de la ligne
-            float initial_y = ImGui::GetCursorPosY();
-            ImGui::TextDisabled("ÉDITEUR TEXTUEL DE CODE");
-            
-            // 2. Alignement des boutons miniatures à l'extrême droite
-            float button_size = 24.0f;
-            float target_icon_size = 16.0f;
-            float total_buttons_width = (button_size * 2.0f) + ImGui::GetStyle().ItemSpacing.x;
-            
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - total_buttons_width - 15.0f);
-            ImGui::SetCursorPosY(initial_y - 2.0f);
-
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.25f, 0.25f, 0.35f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.35f, 0.35f, 0.35f, 0.55f));
-
-            if (ImGui::Button("##exec_btn", ImVec2(button_size, button_size))) {}
-            ImGui::SetItemTooltip("Exécuter le script (Ctrl+Entrée)");
-            
-            float offset_xy = (button_size - target_icon_size) * 0.5f;
-            ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), target_icon_size, 
-                ImVec2(ImGui::GetCursorScreenPos().x - button_size + offset_xy - ImGui::GetStyle().ItemSpacing.x, ImGui::GetCursorScreenPos().y + offset_xy), 
-                ImGui::GetColorU32(ImGuiCol_Text), ICON_LC_PLAY);
-            
-            ImGui::SameLine();
-            
-            if (ImGui::Button("##format_btn", ImVec2(button_size, button_size))) {}
-            ImGui::SetItemTooltip("Formater le code SQL");
-            
-            ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), target_icon_size, 
-                ImVec2(ImGui::GetCursorScreenPos().x - button_size + offset_xy, ImGui::GetCursorScreenPos().y + offset_xy), 
-                ImGui::GetColorU32(ImGuiCol_Text), ICON_LC_BOX);
-            
-            ImGui::PopStyleColor(3);
-            ImGui::SetCursorPosY(initial_y + button_size + 2.0f);
-            ImGui::Separator();
-
-            // -----------------------------------------------------------------
-            // CALCULS ET GESTION DU SPLITTER DYNAMIQUE
-            // -----------------------------------------------------------------
-            float total_available_height = ImGui::GetContentRegionAvail().y - 25.0f;
-            float minimum_zone_height = 80.0f; // Empêche d'écraser complètement une zone
-
-            // --- ZONE SUPÉRIEURE : ÉDITEUR TEXTUEL ---
-            ImGui::BeginChild("CodeEditorZone", ImVec2(-1.0f, m_queryEditorHeight), false, ImGuiWindowFlags_NoScrollbar);
-            static char query_text_buffer[] = 
-                "-- Requête dizui générée automatiquement\n"
-                "SELECT users.id, users.name, orders.total\n"
-                "FROM users\n"
-                "LEFT JOIN orders ON users.id = orders.user_id\n"
-                "WHERE users.age > 18\n"
-                "ORDER BY orders.total DESC;";
-
-            ImGuiInputTextFlags editor_flags = ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CtrlEnterForNewLine;
-            ImGui::InputTextMultiline("##query_code_editor", query_text_buffer, IM_ARRAYSIZE(query_text_buffer), 
-                                      ImVec2(-1.0f, -1.0f), editor_flags);
-            ImGui::EndChild();
-
-            // --- LE SPLITTER INTERACTIF (Barre de préhension) ---
-            // On modifie l'apparence pour en faire une ligne fine et discrète
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 2.0f));
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 1.0f));         // Couleur au repos
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.75f, 1.0f, 0.8f));  // Bleu cyan au survol
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.75f, 1.0f, 1.0f));   // Bleu vif quand cliqué
-
-            // Un bouton horizontal qui prend toute la largeur
-            ImGui::Button("##VerticalSplitterBar", ImVec2(-1.0f, 4.0f));
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS); // Change le curseur en flèche Haut/Bas
-
-            // Logique de Drag (Glisser) de la souris pour recalculer la hauteur en temps réel
-            if (ImGui::IsItemActive()) {
-                m_queryEditorHeight += ImGui::GetIO().MouseDelta.y;
-                
-                // Contraintes de sécurité pour éviter que les fenêtres disparaissent
-                if (m_queryEditorHeight < minimum_zone_height) 
-                    m_queryEditorHeight = minimum_zone_height;
-                if (m_queryEditorHeight > total_available_height - minimum_zone_height) 
-                    m_queryEditorHeight = total_available_height - minimum_zone_height;
-            }
-
-            ImGui::PopStyleColor(3);
-            ImGui::PopStyleVar();
-
-            // Titre de la section basse
-            ImGui::TextDisabled("%s  RÉSULTAT DE LA REQUÊTE", ICON_LC_ACTIVITY);
-            ImGui::Separator();
-
-            // --- ZONE INFÉRIEURE : TABLEAU DE DONNÉES (Prend tout le reste) ---
-            float bottom_zone_height = ImGui::GetContentRegionAvail().y - 10.0f;
-            ImGui::BeginChild("ResultTableZone", ImVec2(-1.0f, bottom_zone_height), false);
-
-            ImGuiTableFlags table_flags = ImGuiTableFlags_Borders | 
-                                          ImGuiTableFlags_RowBg | 
-                                          ImGuiTableFlags_ScrollY | 
-                                          ImGuiTableFlags_Resizable;
-
-            if (ImGui::BeginTable("SQLResultTable", 3, table_flags))
-            {
-                ImGui::TableSetupColumn("users.id");
-                ImGui::TableSetupColumn("users.name");
-                ImGui::TableSetupColumn("orders.total");
-                ImGui::TableHeadersRow();
-
-                struct FakeRow { int id; const char* name; float total; };
-                static const FakeRow data_rows[] = {
-                    { 102, "Alice Martin", 1450.50f },
-                    { 105, "Bob Bernard", 890.00f },
-                    { 112, "Charlie Dubois", 2300.15f },
-                    { 115, "David Durand", 120.40f },
-                    { 121, "Emma Robert", 3410.00f },
-                    { 124, "Franck Moreau", 75.00f },
-                    { 130, "Grace Petit", 199.99f },
-                    { 133, "Henri Thomas", 1150.00f },
-                    { 140, "Iris Michel", 450.20f },
-                    { 145, "Julien Garcia", 620.00f }
-                };
-
-                for (int row = 0; row < 10; row++)
-                {
-                    ImGui::TableNextRow();
-                    
-                    ImGui::TableSetColumnIndex(0);
-                    ImGui::Text("%d", data_rows[row].id);
-
-                    ImGui::TableSetColumnIndex(1);
-                    ImGui::Text("%s", data_rows[row].name);
-
-                    ImGui::TableSetColumnIndex(2);
-                    float avail_x = ImGui::GetContentRegionAvail().x;
-                    float text_x = ImGui::CalcTextSize("0000.00 EUR").x;
-                    if (avail_x > text_x) {
-                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - text_x);
-                    }
-                    ImGui::Text("%.2f €", data_rows[row].total);
-                }
-                ImGui::EndTable();
-            }
-            ImGui::EndChild();
-
             ImGui::EndTabItem();
         }
-
-
-
-
-
         ImGui::EndTabBar();
     }
-
     ImGui::End();
-
-
 }
 
-
-void Application::renderWorkflowEditor() {
-    // 1. Activer le contexte du Workflow
-    ed::SetCurrentEditor(m_workflowContext);
-    ed::Begin("WorkflowCanvas");
-
-    // Exemple de structure orientée "Tâches / Flux" (ID 1 à 9)
-    ed::BeginNode(1);
-        ImGui::Text("Tâche Initiale");
-        ed::BeginPin(1, ed::PinKind::Output);
-            ImGui::Text("Suivant ->");
-        ed::EndPin();
-    ed::EndNode();
-
-    ed::BeginNode(2);
-        ImGui::Text("Condition Exécution");
-        ed::BeginPin(2, ed::PinKind::Input);
-            ImGui::Text("-> Entrée");
-        ed::EndPin();
-    ed::EndNode();
-
-    ed::Link(1, 1, 2);
-
-    ed::End();
-    ed::SetCurrentEditor(nullptr); // Décharger
+void Application::renderGlobalModals()
+{
+    renderReverseEngineeringModal();
+    renderCreateTaskModal();
+    renderSaveProjectAsModal();
+    renderOpenProjectModal();
+    renderRenameModals();
 }
 
-void Application::renderQueryEditor() {
-    // ---------------------------------------------------------------------
-    // EN-TÊTE : TITRE ET BOUTON D'EXÉCUTION MINIATURE
-    // ---------------------------------------------------------------------
-    float initial_y = ImGui::GetCursorPosY();
-    ImGui::TextDisabled("CONCEPTEUR GRAPHIQUE DE REQUÊTE");
-    
-    // Aligner le bouton d'exécution miniature à droite (24x24 pixels)
-    float button_size = 24.0f;
-    float target_icon_size = 16.0f;
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - button_size - 15.0f);
-    ImGui::SetCursorPosY(initial_y - 2.0f);
+void Application::renderReverseEngineeringModal()
+{
+    if (m_showReverseModal)
+        ImGui::OpenPopup("Reverse Engineering - Catalogue PostgreSQL");
 
-    // Style de bouton transparent / survol gris
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.25f, 0.25f, 0.35f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.35f, 0.35f, 0.35f, 0.55f));
+    ImGui::SetNextWindowSize(ImVec2(900.0f, 550.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(650.0f, 400.0f), ImVec2(1920.0f, 1080.0f));
 
-    ImVec2 screen_pos = ImGui::GetCursorScreenPos();
-    if (ImGui::Button("##exec_visual_btn", ImVec2(button_size, button_size))) {
-        // TODO: Déclencher l'analyse du graphe et l'exécution de la requête
+    if (ImGui::BeginPopupModal("Reverse Engineering - Catalogue PostgreSQL", &m_showReverseModal, ImGuiWindowFlags_None))
+    {
+        static std::string last_env = "";
+        using PgConnectionPtr = std::shared_ptr<cppsqlx::Connection>;
+        static PgConnectionPtr modalConn = nullptr;
+
+        if (!modalConn || last_env != m_selectedContext)
+        {
+            last_env = m_selectedContext;
+            if (m_activeProject && m_activeProject->logicalConnections().contains(m_selectedGateway))
+            {
+                const auto &gateway = m_activeProject->logicalConnections().at(m_selectedGateway);
+                if (gateway.environments().contains(m_selectedContext))
+                {
+                    const auto &phys = gateway.environments().at(m_selectedContext);
+                    std::string connStr = "dbname=" + phys.dbname_ + " user=" + phys.dbuser_ + " host=" + phys.dbhost_ + " port=" + std::to_string(phys.dbport_) + " sslmode=disable";
+                    modalConn = PgConnectionPtr(new cppsqlx::Connection(connStr));
+                    modalConn->connect();
+                }
+            }
+        }
+
+        if (!modalConn || !modalConn->isConnected())
+        {
+            ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "Erreur Connexion Active.");
+            if (ImGui::Button("Fermer"))
+            {
+                m_showReverseModal = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+            return;
+        }
+
+        cppsqlx::DatabaseMetadata metaDiscover(modalConn);
+        if (m_cachedSchemas.empty())
+        {
+            auto schemaRes = metaDiscover.getSchemas();
+            if (schemaRes)
+                m_cachedSchemas = std::move(*schemaRes);
+        }
+
+        float child_panel_height = ImMax(150.0f, ImGui::GetContentRegionAvail().y - 45.0f);
+        ImGui::BeginChild("LeftDiscoveryPanel", ImVec2(280.0f, child_panel_height), true);
+
+        if (ImGui::BeginCombo("##SchemaSelector", m_reverseSelectedSchema.c_str()))
+        {
+            for (const auto &sch : m_cachedSchemas)
+            {
+                if (ImGui::Selectable(sch.c_str(), m_reverseSelectedSchema == sch))
+                {
+                    m_reverseSelectedSchema = sch;
+                    m_reverseSelectedObject = "";
+                    m_cachedStructure.clear();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        if (m_cachedTables.empty())
+        {
+            auto tablesRes = metaDiscover.getTables(m_reverseSelectedSchema);
+            if (tablesRes)
+                m_cachedTables = std::move(*tablesRes);
+        }
+
+        if (ImGui::TreeNodeEx("Tables", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            for (const auto &tbl : m_cachedTables)
+            {
+                ImGui::PushID(tbl.c_str());
+                if (ImGui::Selectable(tbl.c_str(), m_reverseSelectedObject == tbl))
+                {
+                    m_reverseSelectedObject = tbl;
+                    auto structRes = metaDiscover.getTableStructure(m_reverseSelectedObject, m_reverseSelectedSchema);
+                    if (structRes)
+                        m_cachedStructure = std::move(*structRes);
+                }
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+        ImGui::BeginChild("RightStructurePanel", ImVec2(0.0f, child_panel_height), true);
+
+        if (!m_reverseSelectedObject.empty() && ImGui::BeginTable("MetadataColumnsTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable))
+        {
+            ImGui::TableSetupColumn("Nom");
+            ImGui::TableSetupColumn("Type");
+            ImGui::TableSetupColumn("Null");
+            ImGui::TableSetupColumn("PK");
+            ImGui::TableHeadersRow();
+
+            for (const auto &col : m_cachedStructure)
+            {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%s", col.name.c_str());
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%s", col.dataType.c_str());
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%s", col.isNullable ? "Oui" : "Non");
+                ImGui::TableSetColumnIndex(3);
+                ImGui::Text("%s", col.isPrimaryKey ? "[PK]" : "-");
+            }
+            ImGui::EndTable();
+        }
+        ImGui::EndChild();
+
+        ImGui::Separator();
+        if (ImGui::Button("Monter dans le Projet") && m_activeProject)
+        {
+            auto datasetRes = cppsqlx::DatasetFactory().createFromDatabase(*modalConn, m_reverseSelectedObject);
+            if (datasetRes)
+                m_activeProject->addDataset(std::move(datasetRes.value()));
+            m_showReverseModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Annuler"))
+        {
+            m_showReverseModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
-    ImGui::SetItemTooltip("Exécuter le graphe de requête");
-    
-    // Dessiner l'icône réduite au centre du bouton
-    float offset_xy = (button_size - target_icon_size) * 0.5f;
-    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), target_icon_size, 
-        ImVec2(screen_pos.x + offset_xy, screen_pos.y + offset_xy), 
-        ImGui::GetColorU32(ImGuiCol_Text), ICON_LC_PLAY);
-    
-    ImGui::PopStyleColor(3);
-    
-    // Caler le curseur sous l'en-tête
-    ImGui::SetCursorPosY(initial_y + button_size + 2.0f);
+}
+
+void Application::renderCreateTaskModal()
+{
+    if (m_showCreateTaskModal)
+        ImGui::OpenPopup("Créer une nouvelle tâche de flux");
+
+    ImGui::SetNextWindowSize(ImVec2(950.0f, 550.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(750.0f, 400.0f), ImVec2(1920.0f, 1080.0f));
+
+    if (ImGui::BeginPopupModal("Créer une nouvelle tâche de flux", &m_showCreateTaskModal, ImGuiWindowFlags_None))
+    {
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Studio d'Orchestration : Configuration Multi-Étapes", ICON_LC_ACTIVITY);
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Nom du Pipeline Task (Workflow) :");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(300.0f);
+        if (ImGui::InputText("##TaskNameInput", m_newTaskNameBuf, IM_ARRAYSIZE(m_newTaskNameBuf)))
+        {
+            m_workingTaskContext.setName(m_newTaskNameBuf);
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float panel_height = ImGui::GetContentRegionAvail().y - 45.0f;
+        float form_panel_width = 410.0f;
+        float preview_panel_width = ImGui::GetContentRegionAvail().x - form_panel_width - ImGui::GetStyle().ItemSpacing.x;
+
+        // Panneau gauche : Formulaire d'étape
+        ImGui::BeginChild("LeftStepFormPanel", ImVec2(form_panel_width, panel_height), true);
+        ImGui::TextColored(ImVec4(0.55f, 0.35f, 0.9f, 1.0f), "CONSTRUIRE UNE ÉTAPE");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Index de l'étape (Step Index dans la Map) :");
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::InputInt("##StepIndexInput", &m_currentStepIndex, 1, 1);
+        if (m_currentStepIndex < 1)
+            m_currentStepIndex = 1;
+
+        ImGui::Spacing();
+
+        ImGui::Text("Nom de la Cible de calcul (name) :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##StepNameInput", m_newTaskStepNameBuf, IM_ARRAYSIZE(m_newTaskStepNameBuf));
+
+        ImGui::Spacing();
+
+        ImGui::Text("Type de Target d'atterrissage (TargetType) :");
+        ImGui::SetNextItemWidth(-1.0f);
+        const char *target_types_labels[] = {"Table physique (Table)", "Vue SQL (View)", "Table Temporaire (TemporaryTable)", "Sous-requête (SubQuery)"};
+        if (ImGui::BeginCombo("##TargetTypeComboSelector", target_types_labels[m_selectedTargetTypeIndex]))
+        {
+            for (int i = 0; i < 4; ++i)
+            {
+                if (ImGui::Selectable(target_types_labels[i], m_selectedTargetTypeIndex == i))
+                    m_selectedTargetTypeIndex = i;
+            }
+            ImGui::EndCombo();
+        }
+
+        if (m_selectedTargetTypeIndex == 0)
+        {
+            ImGui::Spacing();
+            ImGui::TextDisabled("Stratégie d'écriture de la Table :");
+            ImGui::RadioButton("Écraser (CTAS)", &m_tableOperationMode, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("Ajouter à la suite (INSERT)", &m_tableOperationMode, 1);
+            ImGui::Spacing();
+        }
+
+        ImGui::Spacing();
+
+        ImGui::Text("Associer la requête SQL du graphe :");
+        ImGui::SetNextItemWidth(-1.0f);
+        std::string combo_preview = "Sélectionner une requête...";
+        if (m_selectedQueryIndexForTask >= 0 && m_selectedQueryIndexForTask < static_cast<int>(m_savedQueries.size()))
+        {
+            combo_preview = m_savedQueries[m_selectedQueryIndexForTask].name;
+        }
+        if (ImGui::BeginCombo("##TaskQuerySelectorCombo", combo_preview.c_str()))
+        {
+            for (int i = 0; i < static_cast<int>(m_savedQueries.size()); ++i)
+            {
+                if (ImGui::Selectable(m_savedQueries[i].name.c_str(), m_selectedQueryIndexForTask == i))
+                    m_selectedQueryIndexForTask = i;
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        bool is_step_valid = (strlen(m_newTaskStepNameBuf) > 0) && (m_selectedQueryIndexForTask >= 0);
+        if (!is_step_valid)
+            ImGui::BeginDisabled();
+
+        if (ImGui::Button((std::string(ICON_LC_PLUS_CIRCLE) + "  Ajouter cette étape au pipeline").c_str(), ImVec2(-1.0f, 30.0f)))
+        {
+            cppsqlx::UnitSelect currentUnit;
+            currentUnit.name = m_newTaskStepNameBuf;
+            currentUnit.quoted = false;
+            cppsqlx::SelectQuery targetSelect;
+            if (m_selectedQueryIndexForTask >= 0 && m_selectedQueryIndexForTask < static_cast<int>(m_savedQueries.size()))
+            {
+                const auto &selectedQuery = m_savedQueries[m_selectedQueryIndexForTask];
+                if (!selectedQuery.compiledSelectJson.is_null() && !selectedQuery.compiledSelectJson.empty())
+                {
+                    auto selRes = cppsqlx::SelectQuery::fromJSON(selectedQuery.compiledSelectJson);
+                    if (selRes.has_value())
+                    {
+                        targetSelect = std::move(selRes.value());
+                    }
+                }
+            }
+            if (m_selectedTargetTypeIndex == 0)
+            {
+                if (m_tableOperationMode == 0)
+                    currentUnit.convertToCTAS(targetSelect);
+                else
+                    currentUnit.convertToInsert(targetSelect);
+            }
+            else
+            {
+                if (m_selectedTargetTypeIndex == 1)
+                    currentUnit.targetType = cppsqlx::TargetType::View;
+                if (m_selectedTargetTypeIndex == 2)
+                    currentUnit.targetType = cppsqlx::TargetType::TemporaryTable;
+                if (m_selectedTargetTypeIndex == 3)
+                    currentUnit.targetType = cppsqlx::TargetType::SubQuery;
+                currentUnit.query = targetSelect;
+            }
+            m_workingTaskContext.addStep(m_currentStepIndex, std::move(currentUnit));
+            memset(m_newTaskStepNameBuf, 0, sizeof(m_newTaskStepNameBuf));
+            m_currentStepIndex++;
+        }
+        if (!is_step_valid)
+            ImGui::EndDisabled();
+        ImGui::EndChild();
+        ImGui::SameLine();
+        // Panneau droit : Récapitulatif des étapes
+        ImGui::BeginChild("RightStepListPreviewPanel", ImVec2(preview_panel_width, panel_height), true);
+        ImGui::TextColored(ImVec4(0.25f, 0.75f, 0.45f, 1.0f), "SÉQUENCE DES ÉTAPES DE LA TÂCHE");
+        ImGui::Separator();
+        ImGui::Spacing();
+        if (m_workingTaskContext.steps().empty())
+        {
+            ImGui::TextDisabled("Aucune étape insérée pour le moment.\nUtilisez le panneau de gauche pour peupler la tâche.");
+        }
+        else
+        {
+            for (const auto &[stepId, unit] : m_workingTaskContext.steps())
+            {
+                ImGui::PushID(stepId);
+                std::string type_str = "SELECT";
+                if (unit.query.index() == 1)
+                    type_str = "INSERT";
+                if (unit.query.index() == 2)
+                    type_str = "CTAS";
+                ImGui::Bullet();
+                ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "Étape %d :", stepId);
+                ImGui::SameLine();
+                ImGui::Text("[%s] -> %s", type_str.c_str(), unit.name.c_str());
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+        ImGui::Separator();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 240.0f);
+        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        {
+            m_workingTaskContext = cppsqlx::Task();
+            m_showCreateTaskModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool is_task_ready = (strlen(m_newTaskNameBuf) > 0) && (!m_workingTaskContext.steps().empty());
+        if (!is_task_ready)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Valider la Tâche", ImVec2(130.0f, 0.0f)))
+        {
+            m_savedTasks.push_back(std::move(m_workingTaskContext));
+            m_workingTaskContext = cppsqlx::Task();
+            memset(m_newTaskNameBuf, 0, sizeof(m_newTaskNameBuf));
+            m_currentStepIndex = 1;
+            m_showCreateTaskModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!is_task_ready)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+}
+
+void Application::renderSaveProjectAsModal()
+{
+    if (m_showSaveProjectAsModal)
+        ImGui::OpenPopup("Enregistrer le projet sous");
+    ImGui::SetNextWindowSize(ImVec2(640.0f, 440.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(500.0f, 340.0f), ImVec2(1200.0f, 800.0f));
+    if (ImGui::BeginPopupModal("Enregistrer le projet sous", &m_showSaveProjectAsModal, ImGuiWindowFlags_None))
+    {
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Destination de sauvegarde du projet", ICON_LC_FOLDER_OPEN);
+        ImGui::Separator();
+        ImGui::Spacing();
+        if (ImGui::Button(".. (Parent)"))
+        {
+            if (m_browserCurrentDir.has_parent_path())
+                m_browserCurrentDir = m_browserCurrentDir.parent_path();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button((std::string(ICON_LC_PLUS_CIRCLE) + " Nouveau dossier").c_str()))
+        {
+            m_showNewFolderInput = !m_showNewFolderInput;
+            memset(m_newFolderNameBuf, 0, sizeof(m_newFolderNameBuf));
+        }
+        ImGui::Spacing();
+        ImGui::TextDisabled("Répertoire actuel :");
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", m_browserCurrentDir.string().c_str());
+        if (m_showNewFolderInput)
+        {
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(280.0f);
+            ImGui::InputTextWithHint("##NewFolderName", "Nom du nouveau répertoire...", m_newFolderNameBuf, IM_ARRAYSIZE(m_newFolderNameBuf));
+            ImGui::SameLine();
+            if (ImGui::Button("Créer") && strlen(m_newFolderNameBuf) > 0)
+            {
+                std::error_code ec;
+                std::filesystem::path targetNewDir = m_browserCurrentDir / m_newFolderNameBuf;
+                if (std::filesystem::create_directories(targetNewDir, ec))
+                {
+                    m_browserCurrentDir = targetNewDir;
+                    m_showNewFolderInput = false;
+                    memset(m_newFolderNameBuf, 0, sizeof(m_newFolderNameBuf));
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Annuler##CancelDir"))
+                m_showNewFolderInput = false;
+        }
+        ImGui::Spacing();
+        float listHeight = ImGui::GetContentRegionAvail().y - 85.0f;
+        ImGui::BeginChild("DirectoryBrowserList", ImVec2(-1.0f, listHeight), true);
+        std::error_code ec;
+        std::vector<std::filesystem::directory_entry> dirs;
+        std::vector<std::filesystem::directory_entry> files;
+        for (const auto &entry : std::filesystem::directory_iterator(m_browserCurrentDir, ec))
+        {
+            std::string fname = entry.path().filename().string();
+            if (fname.starts_with("."))
+                continue;
+            if (entry.is_directory(ec))
+                dirs.push_back(entry);
+            else if (entry.is_regular_file(ec) && entry.path().extension() == ".json")
+                files.push_back(entry);
+        }
+        auto sortByName = [](const auto &a, const auto &b)
+        { return a.path().filename() < b.path().filename(); };
+        std::sort(dirs.begin(), dirs.end(), sortByName);
+        std::sort(files.begin(), files.end(), sortByName);
+        for (const auto &dir : dirs)
+        {
+            std::string label = std::string(ICON_LC_FOLDER_OPEN) + "  " + dir.path().filename().string();
+            if (ImGui::Selectable(label.c_str(), false))
+                m_browserCurrentDir = dir.path();
+        }
+        for (const auto &file : files)
+        {
+            std::string fname = file.path().filename().string();
+            std::string label = std::string(ICON_LC_BOX) + "  " + fname;
+            if (ImGui::Selectable(label.c_str(), fname == std::string(m_projectFileNameBuf)))
+                strncpy(m_projectFileNameBuf, fname.c_str(), sizeof(m_projectFileNameBuf) - 1);
+        }
+        ImGui::EndChild();
+        ImGui::Spacing();
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("Nom du fichier :");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##ProjectFileNameInput", m_projectFileNameBuf, IM_ARRAYSIZE(m_projectFileNameBuf));
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 230.0f);
+        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        {
+            m_showSaveProjectAsModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool is_name_valid = (strlen(m_projectFileNameBuf) > 0);
+        if (!is_name_valid)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        {
+            std::string fileName(m_projectFileNameBuf);
+            if (fileName.find(".json") == std::string::npos)
+                fileName += ".json";
+            std::filesystem::path fullTargetPath = m_browserCurrentDir / fileName;
+            if (saveProjectToFile(fullTargetPath.string()))
+            {
+                m_showSaveProjectAsModal = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        if (!is_name_valid)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+}
+
+void Application::renderOpenProjectModal()
+{
+    if (m_showOpenProjectModal)
+        ImGui::OpenPopup("Ouvrir un projet");
+    ImGui::SetNextWindowSize(ImVec2(640.0f, 420.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(500.0f, 320.0f), ImVec2(1200.0f, 800.0f));
+    if (ImGui::BeginPopupModal("Ouvrir un projet", &m_showOpenProjectModal, ImGuiWindowFlags_None))
+    {
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Sélectionner un fichier projet (.json)", ICON_LC_FOLDER_OPEN);
+        ImGui::Separator();
+        ImGui::Spacing();
+        if (ImGui::Button(".. (Parent)"))
+        {
+            if (m_browserCurrentDir.has_parent_path())
+                m_browserCurrentDir = m_browserCurrentDir.parent_path();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Répertoire :");
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", m_browserCurrentDir.string().c_str());
+        ImGui::Spacing();
+        float listHeight = ImGui::GetContentRegionAvail().y - 75.0f;
+        ImGui::BeginChild("OpenProjectBrowserList", ImVec2(-1.0f, listHeight), true);
+        std::error_code ec;
+        std::vector<std::filesystem::directory_entry> dirs;
+        std::vector<std::filesystem::directory_entry> files;
+        for (const auto &entry : std::filesystem::directory_iterator(m_browserCurrentDir, ec))
+        {
+            std::string fname = entry.path().filename().string();
+            if (fname.starts_with("."))
+                continue;
+            if (entry.is_directory(ec))
+                dirs.push_back(entry);
+            else if (entry.is_regular_file(ec) && entry.path().extension() == ".json")
+                files.push_back(entry);
+        }
+        auto sortByName = [](const auto &a, const auto &b)
+        { return a.path().filename() < b.path().filename(); };
+        std::sort(dirs.begin(), dirs.end(), sortByName);
+        std::sort(files.begin(), files.end(), sortByName);
+        for (const auto &dir : dirs)
+        {
+            std::string label = std::string(ICON_LC_FOLDER_OPEN) + "  " + dir.path().filename().string();
+            if (ImGui::Selectable(label.c_str(), false))
+                m_browserCurrentDir = dir.path();
+        }
+        for (const auto &file : files)
+        {
+            std::string fname = file.path().filename().string();
+            std::string label = std::string(ICON_LC_BOX) + "  " + fname;
+            bool isSelected = (fname == std::string(m_projectFileNameBuf));
+            if (ImGui::Selectable(label.c_str(), isSelected, ImGuiSelectableFlags_AllowDoubleClick))
+            {
+                strncpy(m_projectFileNameBuf, fname.c_str(), sizeof(m_projectFileNameBuf) - 1);
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                {
+                    std::filesystem::path fullPath = m_browserCurrentDir / fname;
+                    if (loadProjectFromFile(fullPath.string()))
+                    {
+                        m_showOpenProjectModal = false;
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+            }
+        }
+        ImGui::EndChild();
+        ImGui::Spacing();
+        ImGui::TextDisabled("Fichier sélectionné :");
+        ImGui::SameLine();
+        ImGui::Text("%s", strlen(m_projectFileNameBuf) > 0 ? m_projectFileNameBuf : "(Aucun)");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 230.0f);
+        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        {
+            m_showOpenProjectModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool can_open = (strlen(m_projectFileNameBuf) > 0);
+        if (!can_open)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Ouvrir", ImVec2(120.0f, 0.0f)))
+        {
+            std::filesystem::path fullPath = m_browserCurrentDir / std::string(m_projectFileNameBuf);
+            if (loadProjectFromFile(fullPath.string()))
+            {
+                m_showOpenProjectModal = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        if (!can_open)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+}
+
+void Application::renderRenameModals()
+{
+    // 1. Modale : Renommer une requête
+    if (m_showRenameQueryModal)
+        ImGui::OpenPopup("Renommer la requête");
+    ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal("Renommer la requête", &m_showRenameQueryModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::Text("Nouveau nom de la requête :");
+        ImGui::SetNextItemWidth(-1.0f);
+        bool enterPressed = ImGui::InputText("##RenameQueryInput", m_renameQueryBuf, IM_ARRAYSIZE(m_renameQueryBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 210.0f);
+        if (ImGui::Button("Annuler", ImVec2(95.0f, 0.0f)))
+        {
+            m_showRenameQueryModal = false;
+            m_renamingQueryIndex = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool isValid = (strlen(m_renameQueryBuf) > 0);
+        if (!isValid)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Valider", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
+        {
+            if (m_renamingQueryIndex >= 0 && m_renamingQueryIndex < static_cast<int>(m_savedQueries.size()))
+            {
+                m_savedQueries[m_renamingQueryIndex].name = std::string(m_renameQueryBuf);
+            }
+            m_showRenameQueryModal = false;
+            m_renamingQueryIndex = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!isValid)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+    // 2. Modale : Renommer un workflow
+    if (m_showRenameWorkflowModal)
+        ImGui::OpenPopup("Renommer le workflow");
+    ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal("Renommer le workflow", &m_showRenameWorkflowModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::Text("Nouveau nom du workflow :");
+        ImGui::SetNextItemWidth(-1.0f);
+        bool enterPressed = ImGui::InputText("##RenameWorkflowInput", m_renameWorkflowBuf, IM_ARRAYSIZE(m_renameWorkflowBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 210.0f);
+        if (ImGui::Button("Annuler", ImVec2(95.0f, 0.0f)))
+        {
+            m_showRenameWorkflowModal = false;
+            m_renamingWorkflowIndex = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool isValid = (strlen(m_renameWorkflowBuf) > 0);
+        if (!isValid)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Valider", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
+        {
+            if (m_renamingWorkflowIndex >= 0 && m_renamingWorkflowIndex < static_cast<int>(m_savedWorkflows.size()))
+            {
+                std::string newName(m_renameWorkflowBuf);
+                auto &wf = m_savedWorkflows[m_renamingWorkflowIndex];
+                wf.name = newName;
+                try
+                {
+                    nlohmann::json j = nlohmann::json::parse(wf.jsonPreview);
+                    if (j.contains("workflow"))
+                        j["workflow"]["name"] = newName;
+                    else
+                        j["name"] = newName;
+                    wf.jsonPreview = j.dump(4);
+                }
+                catch (...)
+                {
+                }
+            }
+            m_showRenameWorkflowModal = false;
+            m_renamingWorkflowIndex = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!isValid)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+}
+
+void Application::renderStatusBar()
+{
+    ImGui::Separator();
+    ImGui::TextDisabled("  %s Outil connecté : %s | Environnement : %s | Graphe : %d nœuds actifs",
+                        ICON_LC_ACTIVITY, m_selectedGateway.c_str(), m_selectedContext.c_str(), (int)m_visualQueryNodes.size());
+}
+
+void Application::renderQueryEditor()
+{
+    float total_available_height = ImGui::GetContentRegionAvail().y - 25.0f;
+    if (m_queryVisualHeight <= 10.0f || m_queryVisualHeight > total_available_height)
+    {
+        m_queryVisualHeight = total_available_height * 0.333f;
+    }
+    float canvas_height = total_available_height - m_queryVisualHeight;
+    float minimum_zone_height = 100.0f;
+
+    // ---------------------------------------------------------------------
+    // BARRE DE COMMANDE HAUTE : ALIGNEMENT COMPACT À 4 BOUTONS ACTIONS
+    // ---------------------------------------------------------------------
+    ImGui::BeginChild("QueryEditorHeaderBandeau", ImVec2(-1.0f, 45.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::SetCursorPosY((45.0f - ImGui::GetTextLineHeight()) * 0.5f);
+    ImGui::TextDisabled("CONCEPTEUR GRAPHIQUE DE REQUÊTE");
+
+    // RECALIBRAGE GÉOMÉTRIQUE : 5 boutons carrés de 32px + 4 intervalles de 8px
+    float available_width = ImGui::GetContentRegionAvail().x;
+    float actions_zone_width = (32.0f * 5) + 32.0f;
+    float actions_x = available_width - actions_zone_width;
+    float target_buttons_y = (45.0f - 28.0f) * 0.5f;
+
+    // Configuration de la pile de style commune
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.40f, 0.40f, 0.40f, 0.35f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.50f, 0.50f, 0.50f, 0.55f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+
+    // BOUTON 0 : Recentrer la caméra sur l'ensemble des nœuds
+    ImGui::SetCursorPosX(actions_x);
+    ImGui::SetCursorPosY(target_buttons_y);
+    if (ImGui::Button(ICON_LC_MAXIMIZE_2, ImVec2(32.0f, 28.0f)))
+    {
+        ed::SetCurrentEditor(m_queryContext);
+        ed::NavigateToContent();
+        ed::SetCurrentEditor(nullptr);
+    }
+    ImGui::SetItemTooltip("Recentrer la vue sur le graphe (Zoom / Pan)");
+
+    // BOUTON 1 : Recherche / Afficher SQL textuel (enchaîné avec SameLine au lieu de SetCursorPosX)
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(target_buttons_y);
+    if (ImGui::Button(ICON_LC_SEARCH, ImVec2(32.0f, 28.0f)))
+    {
+        m_compiledSQLPreview = compileVisualGraphToSQL();
+        m_showSQLPreviewModal = true;
+    }
+    ImGui::SetItemTooltip("Visualiser le code SQL textuel généré");
+
+    // BOUTON 2 : Ajouter au Projet (Plus)
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(target_buttons_y);
+    if (ImGui::Button(ICON_LC_PLUS_CIRCLE, ImVec2(32.0f, 28.0f)))
+    {
+        m_showSaveQueryModal = true;
+    }
+    ImGui::SetItemTooltip("Enregistrer cette requête dans le catalogue du projet");
+
+    // BOUTON 3 : Nettoyer le Canevas (Nouvelle Icône Poubelle / Balai)
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(target_buttons_y);
+
+    // Vous pouvez utiliser ICON_LC_TRASH ou ICON_LC_ERASER selon vos icônes chargées
+    if (ImGui::Button(ICON_LC_TRASH, ImVec2(32.0f, 28.0f)))
+    {
+        // NETTOYAGE INTÉGRAL SÉCURISÉ DES STRUCTURES DE DONNÉES
+        m_visualQueryNodes.clear();
+        m_visualQueryLinks.clear();
+        m_visualQueryPredicates.clear();
+
+        // Réinitialisation complète du tableau bas de l'UI
+        m_queryResultHeaders.clear();
+        m_queryResultRows.clear();
+        m_executionError = "";
+
+        // Vidage des métadonnées de la requête en cours d'édition
+        memset(m_saveQueryNameBuf, 0, sizeof(m_saveQueryNameBuf));
+        memset(m_saveQueryDescBuf, 0, sizeof(m_saveQueryDescBuf));
+    }
+    ImGui::SetItemTooltip("Effacer intégralement le canevas et réinitialiser l'espace");
+
+    // BOUTON 4 : Exécution réelle Play
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(target_buttons_y);
+    if (ImGui::Button(ICON_LC_PLAY, ImVec2(32.0f, 28.0f)))
+    {
+        std::string sql_code = compileVisualGraphToSQL();
+        executeVisualQuery(sql_code);
+    }
+    ImGui::SetItemTooltip("Exécuter la requête (Interroger PostgreSQL)");
+
+    ImGui::PopStyleVar(1);
+    ImGui::PopStyleColor(4);
+    ImGui::EndChild();
     ImGui::Separator();
 
-    // ---------------------------------------------------------------------
-    // LOGIQUE DU SPLITTER DYNAMIQUE
-    // ---------------------------------------------------------------------
-    float total_available_height = ImGui::GetContentRegionAvail().y - 25.0f;
-    float minimum_zone_height = 100.0f; // Garder assez d'espace pour manipuler les nœuds
+    // [ Le reste de renderQueryEditor reste parfaitement identique ]
+    renderQueryCanvas(canvas_height);
 
-    // --- ZONE SUPÉRIEURE : CANEVAS GRAPHIQUE DE NŒUDS ---
-    ImGui::BeginChild("QueryNodeCanvasZone", ImVec2(-1.0f, m_queryVisualHeight), false, ImGuiWindowFlags_NoScrollbar);
-    
-    // Moteur graphique imgui-node-editor
-    ed::SetCurrentEditor(m_queryContext);
-    ed::Begin("QueryCanvas");
-
-    // Exemple de structure orientée traitement de données
-    ed::BeginNode(10);
-        ImGui::Text("Source: Table 'Users'");
-        ed::BeginPin(10, ed::PinKind::Output);
-            ImGui::Text("Data Row ->");
-        ed::EndPin();
-    ed::EndNode();
-
-    ed::BeginNode(11);
-        ImGui::Text("Filtre: Age > 18");
-        ed::BeginPin(11, ed::PinKind::Input);
-            ImGui::Text("-> In");
-        ed::EndPin();
-        ImGui::SameLine();
-        ed::BeginPin(12, ed::PinKind::Output);
-            ImGui::Text("Out ->");
-        ed::EndPin();
-    ed::EndNode();
-
-    ed::Link(10, 10, 11);
-
-    ed::End();
-    ed::SetCurrentEditor(nullptr);
-    
-    ImGui::EndChild();
-
-    // --- LE SPLITTER INTERACTIF ---
+    // 3. Zone Intermédiaire : Le Splitter Horizontal Rédimensionnable
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 2.0f));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.75f, 1.0f, 0.8f)); // S'allume en bleu
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.75f, 1.0f, 0.8f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.75f, 1.0f, 1.0f));
-
     ImGui::Button("##VisualSplitterBar", ImVec2(-1.0f, 4.0f));
-    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-
-    if (ImGui::IsItemActive()) {
-        m_queryVisualHeight += ImGui::GetIO().MouseDelta.y;
-        
-        // Contraintes anti-débordement
-        if (m_queryVisualHeight < minimum_zone_height) 
-            m_queryVisualHeight = minimum_zone_height;
-        if (m_queryVisualHeight > total_available_height - minimum_zone_height) 
-            m_queryVisualHeight = total_available_height - minimum_zone_height;
+    if (ImGui::IsItemActive())
+    {
+        m_queryVisualHeight -= ImGui::GetIO().MouseDelta.y;
+        m_queryVisualHeight = ImClamp(m_queryVisualHeight, minimum_zone_height, total_available_height - minimum_zone_height);
     }
-
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar();
 
-    // Titre section basse
+    // 4. Zone B : La table basse de résultats PostgreSQL
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::TextDisabled("%s  RÉSULTAT DU GRAPHE VISUEL", ICON_LC_ACTIVITY);
     ImGui::Separator();
 
-    // --- ZONE INFÉRIEURE : TABLEAU DE DONNÉES EN MODE ZÈBRE ---
     float bottom_zone_height = ImGui::GetContentRegionAvail().y - 10.0f;
+    renderQueryResultTable(bottom_zone_height);
+
+    ImGui::PopStyleVar(1);
+
+    // 5. Zone C : Les Popups modaux d'UI (Jointures, Filtres WHERE)
+    renderQueryModals();
+
+    // =========================================================================
+    // MODALE DE PRÉVISUALISATION DU CODE SQL TEXTUEL
+    // =========================================================================
+    if (m_showSQLPreviewModal)
+    {
+        ImGui::OpenPopup("Aperçu de la Requête Compilée");
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(750.0f, 400.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(500.0f, 250.0f), ImVec2(1600.0f, 900.0f));
+
+    if (ImGui::BeginPopupModal("Aperçu de la Requête Compilée", &m_showSQLPreviewModal, ImGuiWindowFlags_None))
+    {
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Code SQL natif généré via cppsqlx", ICON_LC_BOX);
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (m_compiledSQLPreview.empty())
+        {
+            ImGui::TextDisabled("Le graphe visuel actuel est vide ou n'a généré aucune instruction valide.");
+        }
+        else
+        {
+            float text_area_height = ImGui::GetContentRegionAvail().y - 45.0f;
+            ImGui::InputTextMultiline("##SQLCodePreviewArea",
+                                      const_cast<char *>(m_compiledSQLPreview.c_str()), m_compiledSQLPreview.length(),
+                                      ImVec2(-1.0f, text_area_height), ImGuiInputTextFlags_ReadOnly);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
+        if (ImGui::Button("Fermer", ImVec2(120.0f, 0.0f)))
+        {
+            m_showSQLPreviewModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // =========================================================================
+    //  ENREGISTREMENT DE LA QUERY DANS LE PROJET
+    // =========================================================================
+    if (m_showSaveQueryModal)
+    {
+        ImGui::OpenPopup("Enregistrer la requête dans le Projet");
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(460.0f, 240.0f), ImGuiCond_Once);
+
+    if (ImGui::BeginPopupModal("Enregistrer la requête dans le Projet", &m_showSaveQueryModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Ajout au catalogue des requêtes", ICON_LC_FOLDER_OPEN);
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Nom de la requête :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##QueryNameInput", m_saveQueryNameBuf, IM_ARRAYSIZE(m_saveQueryNameBuf));
+
+        ImGui::Spacing();
+
+        ImGui::Text("Description / Métadonnées :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextMultiline("##QueryDescInput", m_saveQueryDescBuf, IM_ARRAYSIZE(m_saveQueryDescBuf), ImVec2(-1.0f, 60.0f));
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 230.0f);
+
+        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        {
+            m_showSaveQueryModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+
+        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        {
+            if (strlen(m_saveQueryNameBuf) > 0)
+            {
+                std::string targetName(m_saveQueryNameBuf);
+                std::string targetDesc(m_saveQueryDescBuf);
+
+                // COMPILATION UNIQUE DU SELECTQUERY (SQL + JSON OFFICIEL)
+                cppsqlx::SelectQuery compiledQuery = compileVisualGraphToSelectQuery();
+                std::string sql_snapshot = compiledQuery.toSQL();
+                nlohmann::json selectJson = compiledQuery.toJSON();
+
+                // 1. Capture complète de l'état visuel du graphe
+                nlohmann::json vState;
+                vState["nodes"] = nlohmann::json::array();
+
+                ed::SetCurrentEditor(m_queryContext);
+                for (const auto &node : m_visualQueryNodes)
+                {
+                    ImVec2 pos = ed::GetNodePosition(node.id);
+                    vState["nodes"].push_back({{"id", node.id},
+                                               {"datasetName", node.datasetName},
+                                               {"alias", node.alias},
+                                               {"x", pos.x},
+                                               {"y", pos.y},
+                                               {"selectedColumns", node.selectedColumns}});
+                }
+
+                vState["links"] = nlohmann::json::array();
+                for (const auto &link : m_visualQueryLinks)
+                {
+                    ImVec2 joinPos = ed::GetNodePosition(link.centralNodeId);
+                    vState["links"].push_back({{"id", link.id},
+                                               {"startPinId", link.startPinId},
+                                               {"endPinId", link.endPinId},
+                                               {"centralNodeId", link.centralNodeId},
+                                               {"joinX", joinPos.x},
+                                               {"joinY", joinPos.y},
+                                               {"leftPinId", link.leftPinId},
+                                               {"rightPinId", link.rightPinId},
+                                               {"type", static_cast<int>(link.type)},
+                                               {"leftFieldName", link.leftFieldName},
+                                               {"rightFieldName", link.rightFieldName},
+                                               {"op", static_cast<int>(link.op)}});
+                }
+
+                vState["predicates"] = nlohmann::json::array();
+                for (const auto &pred : m_visualQueryPredicates)
+                {
+                    ImVec2 pos = ed::GetNodePosition(pred.id);
+                    vState["predicates"].push_back({{"id", pred.id},
+                                                    {"x", pos.x},
+                                                    {"y", pos.y},
+                                                    {"inputPinId", pred.inputPinId},
+                                                    {"outputPinId", pred.outputPinId},
+                                                    {"targetColumn", pred.targetColumn},
+                                                    {"op", static_cast<int>(pred.op)},
+                                                    {"value", pred.value},
+                                                    {"connectedSrcPinId", pred.connectedSrcPinId}});
+                }
+                ed::SetCurrentEditor(nullptr);
+
+                // 2. Création de l'objet mis à jour avec son état visuel ET son SelectQuery JSON
+                SavedQuery updatedQuery{targetName, targetDesc, sql_snapshot, vState, selectJson};
+
+                // 3. Recherche par nom pour écraser l'ancienne version ou ajouter la nouvelle
+                auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
+                                       [&targetName](const SavedQuery &q)
+                                       { return q.name == targetName; });
+
+                if (it != m_savedQueries.end())
+                {
+                    *it = std::move(updatedQuery);
+                }
+                else
+                {
+                    m_savedQueries.push_back(std::move(updatedQuery));
+                }
+
+                m_showSaveQueryModal = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        ImGui::EndPopup();
+    }
+}
+
+void Application::renderQueryCanvas(float canvas_height)
+{
+    ImGui::BeginChild("QueryNodeCanvasZone", ImVec2(-1.0f, canvas_height), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoMove);
+
+    // 1. Passe A : Intercepteur de Drag & Drop de nœuds depuis la sidebar
+    handleCanvasInteraction();
+
+    // 2. Initialisation et ouverture de la grille graphique
+    ed::SetCurrentEditor(m_queryContext);
+    ed::Begin("QueryCanvas");
+
+    // Passe B : Rendu polymorphe des différents composants graphiques
+    renderCanvasDatasetNodes();
+    renderCanvasFilterNodes();
+    renderCanvasJoinNodes();
+
+    // Passe C : Intercepteurs d'actions de l'éditeur (Création de liens, Suppressions)
+    handleCanvasActions();
+
+    if (m_needsQueryCentering && !m_visualQueryNodes.empty())
+    {
+        ed::NavigateToContent(0.0f); // 0.0f = cadrage instantané sans animation lente
+        m_needsQueryCentering = false;
+    }
+
+    // Fermeture hermétique et étanche du canevas
+    ed::End();
+    ed::SetCurrentEditor(nullptr);
+
+    ImGui::EndChild();
+}
+
+void Application::handleCanvasInteraction()
+{
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+    {
+        if (const ImGuiPayload *payload = ImGui::GetDragDropPayload())
+        {
+            ed::SetCurrentEditor(m_queryContext);
+            ImVec2 canvas_space_pos = ed::ScreenToCanvas(ImGui::GetMousePos());
+
+            if (strcmp(payload->DataType, "DND_DATASET_NODE") == 0)
+            {
+                std::string dataset_name = (const char *)payload->Data;
+                uintptr_t new_id = m_visualQueryNodes.size() + 100;
+                VisualQueryNode newNode{new_id, dataset_name, canvas_space_pos, true, dataset_name, {}};
+                m_visualQueryNodes.push_back(std::move(newNode));
+            }
+            else if (strcmp(payload->DataType, "DND_PREDICATE_NODE") == 0)
+            {
+                uintptr_t new_pred_id = m_visualQueryPredicates.size() + 200;
+                VisualQueryPredicate newPred{
+                    new_pred_id, canvas_space_pos, true,
+                    new_pred_id + 500000, new_pred_id + 550000,
+                    "Choisir...", cppsqlx::SQLOperator::Equal, "", 0};
+                m_visualQueryPredicates.push_back(std::move(newPred));
+            }
+            ed::SetCurrentEditor(nullptr);
+        }
+    }
+}
+
+void Application::renderCanvasDatasetNodes()
+{
+    for (auto &visualNode : m_visualQueryNodes)
+    {
+        if (visualNode.needsPositionInitialization)
+        {
+            visualNode.needsPositionInitialization = false;
+            ed::SetNodePosition(visualNode.id, visualNode.position);
+        }
+
+        ed::BeginNode(visualNode.id);
+        ImGui::BeginGroup();
+
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Table: %s", ICON_LC_DATABASE, visualNode.datasetName.c_str());
+        ImGui::TextDisabled("  Alias :");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110.0f);
+
+        char alias_buf[256];
+        snprintf(alias_buf, sizeof(alias_buf), "%s", visualNode.alias.c_str());
+        if (ImGui::InputText(("##alias_" + std::to_string(visualNode.id)).c_str(), alias_buf, sizeof(alias_buf)))
+        {
+            visualNode.alias = alias_buf;
+        }
+
+        ImGui::Spacing();
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+
+        if (m_activeProject && m_activeProject->datasets().contains(visualNode.datasetName))
+        {
+            const auto &dataset = m_activeProject->datasets().at(visualNode.datasetName);
+            float type_local_offset = 140.0f;
+            float right_pin_offset = 280.0f;
+
+            for (const auto &[index, colObj] : dataset.columns())
+            {
+                std::string field_name = colObj.name();
+                if (field_name.length() > 14)
+                    field_name = field_name.substr(0, 11) + "...";
+
+                uintptr_t input_pin_id = (visualNode.id * 1000) + index;
+                ed::BeginPin(input_pin_id, ed::PinKind::Input);
+
+                ImGui::PushID(static_cast<int>((visualNode.id * 1000) + index));
+                bool is_selected = visualNode.selectedColumns.contains(index);
+                if (ImGui::Checkbox("##select_col", &is_selected))
+                {
+                    if (is_selected)
+                        visualNode.selectedColumns.insert(index);
+                    else
+                        visualNode.selectedColumns.erase(index);
+                }
+                ImGui::PopID();
+
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", field_name.c_str());
+                ed::EndPin();
+
+                ImGui::SameLine(type_local_offset);
+                std::string field_type = colObj.type();
+                if (field_type.length() > 16)
+                    field_type = field_type.substr(0, 13) + "...";
+                ImGui::TextColored(ImVec4(0.4f, 0.75f, 0.4f, 0.75f), ":  %s", field_type.c_str());
+
+                ImGui::SameLine(right_pin_offset);
+                uintptr_t output_pin_id = (visualNode.id * 1000) + index + 500;
+                ed::BeginPin(output_pin_id, ed::PinKind::Output);
+                ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 0.5f), ICON_LC_CHEVRON_RIGHT);
+                ed::EndPin();
+            }
+        }
+        ImGui::Spacing();
+        ImGui::EndGroup();
+        ed::EndNode();
+    }
+}
+
+void Application::renderCanvasFilterNodes()
+{
+    for (auto &predicateNode : m_visualQueryPredicates)
+    {
+        if (predicateNode.needsPositionInitialization)
+        {
+            predicateNode.needsPositionInitialization = false;
+            ed::SetNodePosition(predicateNode.id, predicateNode.position);
+        }
+
+        ed::PushStyleColor(ed::StyleColor_NodeBg, ImVec4(0.22f, 0.15f, 0.32f, 0.85f));
+        ed::PushStyleColor(ed::StyleColor_NodeBorder, ImVec4(0.55f, 0.35f, 0.9f, 1.0f));
+
+        ed::BeginNode(predicateNode.id);
+        ImGui::BeginGroup();
+
+        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s  Filtre [WHERE]", ICON_LC_FILTER);
+        ImGui::Spacing();
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+
+        ed::BeginPin(predicateNode.inputPinId, ed::PinKind::Input);
+        ImGui::TextDisabled(" ▪ In");
+        ed::EndPin();
+        ImGui::SameLine();
+
+        std::string live_target_column = predicateNode.targetColumn;
+        if (predicateNode.connectedSrcPinId != 0)
+        {
+            uintptr_t table_node_id = predicateNode.connectedSrcPinId / 1000;
+            for (const auto &n : m_visualQueryNodes)
+            {
+                if (n.id == table_node_id)
+                {
+                    std::string raw_col = predicateNode.targetColumn;
+                    if (auto dot = raw_col.find('.'); dot != std::string::npos)
+                        raw_col = raw_col.substr(dot + 1);
+                    live_target_column = n.alias + "." + raw_col;
+                }
+            }
+        }
+
+        std::string op_symbol = std::string(cppsqlx::toSQL(predicateNode.op));
+        std::string summary = live_target_column + " " + op_symbol + " " + (predicateNode.value.empty() ? "?" : predicateNode.value);
+        if (summary.length() > 25)
+            summary = summary.substr(0, 22) + "...";
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.35f, 0.9f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.35f, 0.9f, 0.45f));
+        if (ImGui::Button(summary.c_str(), ImVec2(130.0f, 24.0f)))
+        {
+            m_editingPredicate = &predicateNode;
+            m_showPredicateModal = true;
+        }
+        ImGui::PopStyleColor(2);
+        ImGui::SetItemTooltip("Cliquez pour éditer la condition du prédicat");
+        ImGui::SameLine();
+
+        ed::BeginPin(predicateNode.outputPinId, ed::PinKind::Output);
+        ImGui::TextColored(ImVec4(0.55f, 0.35f, 0.9f, 0.6f), " %s", ICON_LC_CHEVRON_RIGHT);
+        ed::EndPin();
+
+        ImGui::EndGroup();
+        ed::EndNode();
+        ed::PopStyleColor(2);
+
+        if (predicateNode.connectedSrcPinId != 0)
+        {
+            ed::Link(predicateNode.id + 90000, predicateNode.connectedSrcPinId, predicateNode.inputPinId, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 2.5f);
+        }
+    }
+}
+
+void Application::renderCanvasJoinNodes()
+{
+    for (auto &link : m_visualQueryLinks)
+    {
+        ImGui::PushID(static_cast<int>(link.id));
+        bool connects_to_filter = (link.startPinId >= 500000);
+
+        if (connects_to_filter)
+        {
+            ed::Link(link.id * 10, link.startPinId, link.endPinId, ImVec4(1.0f, 1.0f, 1.0f, 0.8f), 2.0f);
+        }
+        else
+        {
+            uintptr_t src_node_id = link.startPinId / 1000;
+            uintptr_t dst_node_id = link.endPinId / 1000;
+
+            ImVec2 p_start = ed::GetNodePosition(src_node_id);
+
+            // 1. Initialisation unique au moment du tracé ou du rechargement du lien
+            if (link.needsJoinPosInit)
+            {
+                link.needsJoinPosInit = false;
+                ed::SetNodePosition(link.centralNodeId, link.joinPosition);
+            }
+            else
+            {
+                ImVec2 current_pos = ed::GetNodePosition(link.centralNodeId);
+                if (current_pos.x == 0.0f && current_pos.y == 0.0f)
+                {
+                    uintptr_t src_col_idx = link.startPinId % 1000;
+                    if (src_col_idx >= 500)
+                        src_col_idx -= 500;
+                    float src_pin_y = p_start.y + 53.0f + ((float)src_col_idx * 23.5f) + 11.0f;
+                    ed::SetNodePosition(link.centralNodeId, ImVec2(p_start.x + 302.0f + 45.0f, src_pin_y - 20.0f));
+                }
+            }
+
+            // 2. Dessin du gros nœud rectangulaire vert
+            ed::PushStyleColor(ed::StyleColor_NodeBg, ImVec4(0.12f, 0.28f, 0.18f, 0.85f));
+            ed::PushStyleColor(ed::StyleColor_NodeBorder, ImVec4(0.25f, 0.75f, 0.45f, 1.0f));
+
+            ed::BeginNode(link.centralNodeId);
+            ImVec2 local_cursor = ImGui::GetCursorPos();
+
+            ImGui::BeginGroup();
+            std::string join_label = "INNER JOIN";
+            ImVec4 icon_color = ImVec4(0.25f, 0.75f, 0.45f, 1.0f);
+
+            if (link.type == cppsqlx::JoinType::LEFT)
+            {
+                join_label = "LEFT JOIN";
+                icon_color = ImVec4(0.40f, 0.80f, 0.40f, 1.0f);
+            }
+            if (link.type == cppsqlx::JoinType::RIGHT)
+            {
+                join_label = "RIGHT JOIN";
+                icon_color = ImVec4(0.85f, 0.65f, 0.20f, 1.0f);
+            }
+            if (link.type == cppsqlx::JoinType::FULL)
+            {
+                join_label = "FULL JOIN";
+                icon_color = ImVec4(0.90f, 0.40f, 0.90f, 1.0f);
+            }
+
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(icon_color.x, icon_color.y, icon_color.z, 0.20f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(icon_color.x, icon_color.y, icon_color.z, 0.40f));
+            if (ImGui::Button(join_label.c_str(), ImVec2(140.0f, 24.0f)))
+            {
+                m_editingJoinLink = &link;
+                m_showJoinModal = true;
+            }
+            ImGui::PopStyleColor(2);
+            ImGui::Spacing();
+
+            // Formule textuelle réactive sous le bouton
+            std::string src_alias = "", dst_alias = "";
+            for (const auto &n : m_visualQueryNodes)
+            {
+                if (n.id == src_node_id)
+                    src_alias = n.alias;
+                if (n.id == dst_node_id)
+                    dst_alias = n.alias;
+            }
+            std::string left_pure = link.leftFieldName;
+            if (auto dot_pos = left_pure.find('.'); dot_pos != std::string::npos)
+                left_pure = left_pure.substr(dot_pos + 1);
+            std::string right_pure = link.rightFieldName;
+            if (auto dot_pos = right_pure.find('.'); dot_pos != std::string::npos)
+                right_pure = right_pure.substr(dot_pos + 1);
+            std::string op_symbol = std::string(cppsqlx::toSQL(link.op));
+            std::string display_expr = src_alias + "." + left_pure + " " + op_symbol + " " + dst_alias + "." + right_pure;
+
+            if (display_expr.length() > 24)
+                display_expr = display_expr.substr(0, 21) + "...";
+            float text_width = ImGui::CalcTextSize(display_expr.c_str()).x;
+            if (text_width < 140.0f)
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (140.0f - text_width) * 0.5f);
+            ImGui::TextDisabled("%s", display_expr.c_str());
+            ImGui::EndGroup();
+
+            // Superposition logique des Pins pour l'effet de câble continu traversant
+            ImGui::SetCursorPos(ImVec2(local_cursor.x + 70.0f, local_cursor.y + 12.0f));
+            ed::BeginPin(link.leftPinId, ed::PinKind::Input);
+            ed::EndPin();
+            ImGui::SameLine(0.0f, 0.0f);
+            ed::BeginPin(link.rightPinId, ed::PinKind::Output);
+            ed::EndPin();
+
+            ed::EndNode();
+            ed::PopStyleColor(2);
+
+            // Rendu des doubles segments raccordés au point central
+            ed::Link(link.id * 10, link.startPinId, link.leftPinId, ImVec4(0.7f, 0.7f, 0.7f, 0.6f), 2.0f);
+            ed::Link(link.id * 10 + 1, link.rightPinId, link.endPinId, icon_color, 2.5f);
+        }
+        ImGui::PopID();
+    }
+}
+
+void Application::handleCanvasActions()
+{
+    if (ed::BeginCreate())
+    {
+        ed::PinId startPinId, endPinId;
+        if (ed::QueryNewLink(&startPinId, &endPinId))
+        {
+            uintptr_t pin_src = startPinId.Get();
+            uintptr_t pin_dst = endPinId.Get();
+            bool src_is_filter = (pin_src >= 500000);
+            bool dst_is_filter = (pin_dst >= 500000);
+            ImVec4 wire_color = (src_is_filter || dst_is_filter) ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f) : ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
+
+            if (ed::AcceptNewItem(wire_color, 2.5f))
+            {
+                uintptr_t table_pin = src_is_filter ? pin_dst : pin_src;
+                uintptr_t filter_pin = src_is_filter ? pin_src : pin_dst;
+
+                if (src_is_filter || dst_is_filter)
+                {
+                    uintptr_t filter_node_id = (filter_pin >= 550000) ? (filter_pin - 550000) : (filter_pin - 500000);
+                    std::string column_name = "colonne";
+                    uintptr_t table_node_id = table_pin / 1000;
+                    uintptr_t col_idx = table_pin % 1000;
+                    if (col_idx >= 500)
+                        col_idx -= 500;
+                    for (const auto &n : m_visualQueryNodes)
+                    {
+                        if (n.id == table_node_id && m_activeProject && m_activeProject->datasets().contains(n.datasetName))
+                        {
+                            const auto &ds = m_activeProject->datasets().at(n.datasetName);
+                            if (ds.columns().contains(col_idx))
+                            {
+                                column_name = n.alias + "." + ds.columns().at(col_idx).name();
+                            }
+                        }
+                    }
+                    for (auto &pred : m_visualQueryPredicates)
+                    {
+                        if (pred.id == filter_node_id)
+                        {
+                            pred.connectedSrcPinId = table_pin;
+                            pred.targetColumn = column_name;
+                        }
+                    }
+                }
+                else
+                {
+                    uintptr_t new_id = m_visualQueryLinks.size() + 1;
+                    std::string src_name = "col_A";
+                    std::string dst_name = "col_B";
+                    uintptr_t src_node = pin_src / 1000;
+                    uintptr_t src_col = pin_src % 1000;
+                    if (src_col >= 500)
+                        src_col -= 500;
+                    uintptr_t dst_node = pin_dst / 1000;
+                    uintptr_t dst_col = pin_dst % 1000;
+                    if (dst_col >= 500)
+                        dst_col -= 500;
+                    for (const auto &n : m_visualQueryNodes)
+                    {
+                        if (n.id == src_node && m_activeProject && m_activeProject->datasets().contains(n.datasetName))
+                        {
+                            if (m_activeProject->datasets().at(n.datasetName).columns().contains(src_col))
+                                src_name = n.alias + "." + m_activeProject->datasets().at(n.datasetName).columns().at(src_col).name();
+                        }
+                        if (n.id == dst_node && m_activeProject->datasets().contains(n.datasetName))
+                        {
+                            if (m_activeProject->datasets().at(n.datasetName).columns().contains(dst_col))
+                                dst_name = n.alias + "." + m_activeProject->datasets().at(n.datasetName).columns().at(dst_col).name();
+                        }
+                    }
+                    VisualQueryLink newLink{new_id, pin_src, pin_dst, new_id + 5000, new_id + 10000, new_id + 15000, cppsqlx::JoinType::INNER, src_name, dst_name, cppsqlx::SQLOperator::Equal};
+
+                    // Initialisation de la coordonnée à 0 pour forcer le premier calcul d'alignement
+                    ed::SetNodePosition(newLink.centralNodeId, ImVec2(0.0f, 0.0f));
+                    m_visualQueryLinks.push_back(std::move(newLink));
+                }
+            }
+        }
+    }
+    ed::EndCreate();
+
+    if (ed::BeginDelete())
+    {
+        ed::NodeId deletedNodeId;
+        while (ed::QueryDeletedNode(&deletedNodeId))
+        {
+            if (ed::AcceptDeletedItem())
+            {
+                std::erase_if(m_visualQueryNodes, [deletedNodeId](const VisualQueryNode &node)
+                              { return node.id == deletedNodeId.Get(); });
+                std::erase_if(m_visualQueryPredicates, [deletedNodeId](const VisualQueryPredicate &pred)
+                              { return pred.id == deletedNodeId.Get(); });
+                std::erase_if(m_visualQueryLinks, [deletedNodeId](const VisualQueryLink &l)
+                              { return (l.startPinId / 1000 == deletedNodeId.Get()) || (l.endPinId / 1000 == deletedNodeId.Get()) || (l.centralNodeId == deletedNodeId.Get()); });
+            }
+        }
+    }
+    ed::EndDelete();
+}
+
+void Application::renderQueryResultTable(float bottom_zone_height)
+{
+    ImGuiTableFlags table_flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
     ImGui::BeginChild("VisualResultTableZone", ImVec2(-1.0f, bottom_zone_height), false);
 
-    ImGuiTableFlags table_flags = ImGuiTableFlags_Borders | 
-                                  ImGuiTableFlags_RowBg | 
-                                  ImGuiTableFlags_ScrollY | 
-                                  ImGuiTableFlags_Resizable;
-
-    if (ImGui::BeginTable("VisualSQLResultTable", 3, table_flags))
+    if (!m_executionError.empty())
     {
-        ImGui::TableSetupColumn("users.id");
-        ImGui::TableSetupColumn("users.name");
-        ImGui::TableSetupColumn("orders.total");
+        ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "%s %s", ICON_LC_ALERT_CIRCLE, m_executionError.c_str());
+    }
+    else if (m_queryResultRows.empty())
+    {
+        ImGui::TextDisabled("Aucun résultat d'exécution disponible. Cliquez sur Play pour lancer la requête.");
+    }
+    else if (ImGui::BeginTable("VisualSQLResultTable", (int)m_queryResultHeaders.size(), table_flags))
+    {
+        for (const auto &header : m_queryResultHeaders)
+        {
+            ImGui::TableSetupColumn(header.c_str());
+        }
         ImGui::TableHeadersRow();
 
-        struct FakeRow { int id; const char* name; float total; };
-        static const FakeRow data_rows[] = {
-            { 102, "Alice Martin", 1450.50f },
-            { 105, "Bob Bernard", 890.00f },
-            { 112, "Charlie Dubois", 2300.15f },
-            { 115, "David Durand", 120.40f },
-            { 121, "Emma Robert", 3410.00f },
-            { 124, "Franck Moreau", 75.00f },
-            { 130, "Grace Petit", 199.99f },
-            { 133, "Henri Thomas", 1150.00f },
-            { 140, "Iris Michel", 450.20f },
-            { 145, "Julien Garcia", 620.00f }
-        };
-
-        for (int row = 0; row < 10; row++)
+        for (const auto &rowData : m_queryResultRows)
         {
             ImGui::TableNextRow();
-            
-            ImGui::TableSetColumnIndex(0);
-            ImGui::Text("%d", data_rows[row].id);
-
-            ImGui::TableSetColumnIndex(1);
-            ImGui::Text("%s", data_rows[row].name);
-
-            ImGui::TableSetColumnIndex(2);
-            float avail_x = ImGui::GetContentRegionAvail().x;
-            float text_x = ImGui::CalcTextSize("0000.00 EUR").x;
-            if (avail_x > text_x) {
-                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - text_x);
+            for (int col = 0; col < (int)rowData.size(); ++col)
+            {
+                ImGui::TableSetColumnIndex(col);
+                ImGui::Text("%s", rowData[col].c_str());
             }
-            ImGui::Text("%.2f €", data_rows[row].total);
         }
         ImGui::EndTable();
     }
     ImGui::EndChild();
+}
+
+void Application::renderQueryModals()
+{
+    // Modale 1 : Édition de la jointure
+    if (m_showJoinModal && m_editingJoinLink != nullptr)
+    {
+        ImGui::OpenPopup("Éditeur de Clause de Jointure");
+    }
+    if (ImGui::BeginPopupModal("Éditeur de Clause de Jointure", &m_showJoinModal, ImGuiWindowFlags_None))
+    {
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Configuration de l'Opérateur JOIN", ICON_LC_SETTINGS);
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextDisabled("1. TYPE DE JOINTURE");
+        int current_type = (int)m_editingJoinLink->type;
+        ImGui::RadioButton("INNER JOIN (Intersection)", &current_type, (int)cppsqlx::JoinType::INNER);
+        ImGui::RadioButton("LEFT JOIN (Priorité Table Gauche)", &current_type, (int)cppsqlx::JoinType::LEFT);
+        ImGui::RadioButton("RIGHT JOIN (Priorité Table Droite)", &current_type, (int)cppsqlx::JoinType::RIGHT);
+        ImGui::RadioButton("FULL JOIN (Union Complète)", &current_type, (int)cppsqlx::JoinType::FULL);
+        m_editingJoinLink->type = (cppsqlx::JoinType)current_type;
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextDisabled("2. CONDITION DE JOINTURE STRUCTUREE (SQLJoinExpression)");
+        ImGui::Spacing();
+
+        uintptr_t s_node = m_editingJoinLink->startPinId / 1000;
+        uintptr_t d_node = m_editingJoinLink->endPinId / 1000;
+        std::string current_src_alias = "";
+        std::string current_dst_alias = "";
+        for (const auto &n : m_visualQueryNodes)
+        {
+            if (n.id == s_node)
+                current_src_alias = n.alias;
+            if (n.id == d_node)
+                current_dst_alias = n.alias;
+        }
+        std::string left_col_raw = m_editingJoinLink->leftFieldName;
+        if (auto dot = left_col_raw.find('.'); dot != std::string::npos)
+            left_col_raw = left_col_raw.substr(dot + 1);
+        std::string right_col_raw = m_editingJoinLink->rightFieldName;
+        if (auto dot = right_col_raw.find('.'); dot != std::string::npos)
+            right_col_raw = right_col_raw.substr(dot + 1);
+        std::string live_left_display = current_src_alias + "." + left_col_raw;
+        std::string live_right_display = current_dst_alias + "." + right_col_raw;
+
+        if (ImGui::BeginTable("##join_expr_table", 3, ImGuiTableFlags_Resizable))
+        {
+            ImGui::TableSetupColumn("Champ Gauche", ImGuiTableColumnFlags_WidthStretch, 0.43f);
+            ImGui::TableSetupColumn("Op", ImGuiTableColumnFlags_WidthStretch, 0.14f);
+            ImGui::TableSetupColumn("Champ Droite", ImGuiTableColumnFlags_WidthStretch, 0.43f);
+            ImGui::TableHeadersRow();
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("##left_field_combo", live_left_display.c_str()))
+            {
+                if (ImGui::Selectable(live_left_display.c_str(), true))
+                {
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TableSetColumnIndex(1);
+            ImGui::SetNextItemWidth(-1.0f);
+            std::string_view current_op_symbol = cppsqlx::toSQL(m_editingJoinLink->op);
+            if (ImGui::BeginCombo("##op_combo", current_op_symbol.data()))
+            {
+                for (auto const &item : cppsqlx::operatorMap)
+                {
+                    if (cppsqlx::isLogical(item.op))
+                        continue;
+                    if (ImGui::Selectable(item.symbol.data(), m_editingJoinLink->op == item.op))
+                    {
+                        m_editingJoinLink->op = item.op;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TableSetColumnIndex(2);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("##right_field_combo", live_right_display.c_str()))
+            {
+                if (ImGui::Selectable(live_right_display.c_str(), true))
+                {
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::EndTable();
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
+        if (ImGui::Button("Enregistrer", ImVec2(120, 0)))
+        {
+            m_editingJoinLink->leftFieldName = live_left_display;
+            m_editingJoinLink->rightFieldName = live_right_display;
+            m_showJoinModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // Modale 2 : Édition de la clause WHERE
+    if (m_showPredicateModal && m_editingPredicate != nullptr)
+    {
+        ImGui::OpenPopup("Configuration du Filtre WHERE");
+    }
+    if (ImGui::BeginPopupModal("Configuration du Filtre WHERE", &m_showPredicateModal, ImGuiWindowFlags_None))
+    {
+        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s  Configuration de la Condition de Filtrage", ICON_LC_FILTER);
+        ImGui::Separator();
+        ImGui::Spacing();
+        std::string modal_target_display = m_editingPredicate->targetColumn;
+        if (m_editingPredicate->connectedSrcPinId != 0)
+        {
+            uintptr_t table_node_id = m_editingPredicate->connectedSrcPinId / 1000;
+            for (const auto &n : m_visualQueryNodes)
+            {
+                if (n.id == table_node_id)
+                {
+                    std::string raw_col = m_editingPredicate->targetColumn;
+                    if (auto dot = raw_col.find('.'); dot != std::string::npos)
+                        raw_col = raw_col.substr(dot + 1);
+                    modal_target_display = n.alias + "." + raw_col;
+                }
+            }
+        }
+        ImGui::TextDisabled("Champ cible :");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", modal_target_display.c_str());
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextDisabled("ÉDITION DE L'EXPRESSION DE FILTRE");
+        ImGui::Spacing();
+
+        if (ImGui::BeginTable("##predicate_expr_table", 2, ImGuiTableFlags_Resizable))
+        {
+            ImGui::TableSetupColumn("Opérateur", ImGuiTableColumnFlags_WidthStretch, 0.35f);
+            ImGui::TableSetupColumn("Valeur / Littéral", ImGuiTableColumnFlags_WidthStretch, 0.65f);
+            ImGui::TableHeadersRow();
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::SetNextItemWidth(-1.0f);
+            std::string_view current_op_symbol = cppsqlx::toSQL(m_editingPredicate->op);
+            if (ImGui::BeginCombo("##pred_op_combo", current_op_symbol.data()))
+            {
+                for (auto const &item : cppsqlx::operatorMap)
+                {
+                    if (cppsqlx::isLogical(item.op))
+                        continue;
+                    if (ImGui::Selectable(item.symbol.data(), m_editingPredicate->op == item.op))
+                    {
+                        m_editingPredicate->op = item.op;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TableSetColumnIndex(1);
+            ImGui::SetNextItemWidth(-1.0f);
+            char val_buf[256];
+            snprintf(val_buf, sizeof(val_buf), "%s", m_editingPredicate->value.c_str());
+            if (ImGui::InputText("##pred_value_input", val_buf, sizeof(val_buf)))
+            {
+                m_editingPredicate->value = val_buf;
+            }
+            ImGui::EndTable();
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
+        if (ImGui::Button("Enregistrer", ImVec2(120, 0)))
+        {
+            m_editingPredicate->targetColumn = modal_target_display;
+            m_showPredicateModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void Application::renderWorkflowEditor()
+{
+    renderWorkflowToolbar();
+    ImGui::Separator();
+    renderWorkflowCanvas();
+    renderWorkflowModals();
+}
+
+void Application::renderWorkflowToolbar()
+{
+    ImGui::BeginChild("WorkflowHeaderBandeau", ImVec2(-1.0f, 45.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    ImGui::SetCursorPosY((45.0f - ImGui::GetTextLineHeight()) * 0.5f);
+    ImGui::TextDisabled("%s  WORKFLOW :", ICON_LC_ACTIVITY);
+
+    ImGui::SameLine();
+    ImGui::SetCursorPosY((45.0f - ImGui::GetFrameHeight()) * 0.5f);
+    ImGui::SetNextItemWidth(220.0f);
+    ImGui::InputText("##ActiveWorkflowNameInput", m_activeWorkflowNameBuf, IM_ARRAYSIZE(m_activeWorkflowNameBuf));
+
+    float actions_zone_width = (32.0f * 5) + 32.0f;
+    float actions_x = ImGui::GetWindowWidth() - actions_zone_width;
+    float target_buttons_y = (45.0f - 28.0f) * 0.5f;
+
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.40f, 0.40f, 0.40f, 0.35f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.50f, 0.50f, 0.50f, 0.55f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.85f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+
+    // BOUTON 0 : Recentrer la vue
+    ImGui::SetCursorPosX(actions_x);
+    ImGui::SetCursorPosY(target_buttons_y);
+    if (ImGui::Button(ICON_LC_MAXIMIZE_2, ImVec2(32.0f, 28.0f)))
+    {
+        ed::SetCurrentEditor(m_workflowContext);
+        ed::NavigateToContent();
+        ed::SetCurrentEditor(nullptr);
+    }
+    ImGui::SetItemTooltip("Recentrer la vue sur le workflow");
+
+    // BOUTON 1 : Visualiser le JSON
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(target_buttons_y);
+    if (ImGui::Button(ICON_LC_SEARCH, ImVec2(32.0f, 28.0f)))
+    {
+        m_compiledWorkflowJson = compileWorkflowToJSON(std::string(m_activeWorkflowNameBuf));
+        m_showWorkflowJsonModal = true;
+    }
+    ImGui::SetItemTooltip("Visualiser le JSON généré par ce workflow");
+
+    // BOUTON 2 : Ajouter au Projet
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(target_buttons_y);
+    if (ImGui::Button(ICON_LC_PLUS_CIRCLE, ImVec2(32.0f, 28.0f)))
+    {
+        strncpy(m_saveWorkflowNameBuf, m_activeWorkflowNameBuf, sizeof(m_saveWorkflowNameBuf) - 1);
+        strncpy(m_saveWorkflowDescBuf, m_activeWorkflowDescBuf, sizeof(m_saveWorkflowDescBuf) - 1);
+        m_showSaveWorkflowModal = true;
+    }
+    ImGui::SetItemTooltip("Enregistrer ce workflow dans le projet");
+
+    // BOUTON 3 : Effacer le canevas
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(target_buttons_y);
+    if (ImGui::Button(ICON_LC_TRASH, ImVec2(32.0f, 28.0f)))
+    {
+        m_workflowNodes.clear();
+        m_workflowLinks.clear();
+        std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
+        m_liveJobStatuses.clear();
+        m_liveJobMessages.clear();
+    }
+    ImGui::SetItemTooltip("Nettoyer intégralement le canevas de workflow");
+
+    // BOUTON 4 : Exécuter le workflow
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(target_buttons_y);
+    bool isRunning = m_isWorkflowRunning.load();
+    if (isRunning)
+        ImGui::BeginDisabled();
+
+    if (ImGui::Button(ICON_LC_PLAY, ImVec2(32.0f, 28.0f)))
+    {
+        if (!m_workflowNodes.empty())
+        {
+            m_showRunWorkflowModal = true;
+        }
+    }
+    if (isRunning)
+        ImGui::EndDisabled();
+    ImGui::SetItemTooltip(isRunning ? "Exécution en cours..." : "Configurer et exécuter ce workflow");
+
+    ImGui::PopStyleVar(1);
+    ImGui::PopStyleColor(4);
+    ImGui::EndChild();
+}
+
+void Application::renderWorkflowCanvas()
+{
+    ImGui::BeginChild("WorkflowNodeCanvasZone", ImVec2(-1.0f, -1.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoMove);
+
+    ed::SetCurrentEditor(m_workflowContext);
+    ed::Begin("WorkflowCanvas");
+
+    ed::GetStyle().LinkStrength = 130.0f;
+    ed::GetStyle().PinRadius = 5.0f;
+    ed::GetStyle().PivotAlignment = ImVec2(0.0f, 0.5f);
+    ed::GetStyle().SourceDirection = ImVec2(1.0f, 0.0f);
+    ed::GetStyle().TargetDirection = ImVec2(-1.0f, 0.0f);
+    ed::GetStyle().PinArrowSize = 0.0f;
+
+    // 1. Gestion du Drag & Drop asynchrone
+    static std::string pending_task_name = "";
+    static ImVec2 pending_mouse_pos;
+    static bool has_pending_drop = false;
+
+    if (has_pending_drop)
+    {
+        has_pending_drop = false;
+        ImVec2 canvas_pos = ed::ScreenToCanvas(pending_mouse_pos);
+
+        uintptr_t maxNodeId = 2000;
+        for (const auto &existing : m_workflowNodes)
+        {
+            if (existing.id >= maxNodeId)
+                maxNodeId = existing.id + 1;
+        }
+
+        m_workflowNodes.push_back(WorkflowJobNode{
+            maxNodeId,
+            pending_task_name,
+            canvas_pos,
+            true,
+            maxNodeId * 10,
+            (maxNodeId * 10) + 1});
+    }
+
+    // 2. Synchronisation thread-safe des statuts d'exécution
+    {
+        std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
+        for (auto &n : m_workflowNodes)
+        {
+            if (m_liveJobStatuses.contains(n.taskName))
+                n.executionStatus = m_liveJobStatuses[n.taskName];
+            if (m_liveJobMessages.contains(n.taskName))
+                n.statusMessage = m_liveJobMessages[n.taskName];
+        }
+    }
+
+    // 3. Rendu des nœuds de jobs
+    for (auto &node : m_workflowNodes)
+    {
+        if (node.needsPositionInitialization)
+        {
+            node.needsPositionInitialization = false;
+            ed::SetNodePosition(node.id, node.position);
+        }
+
+        ImVec4 nodeBgColor = ImVec4(0.11f, 0.16f, 0.25f, 0.95f);
+        ImVec4 borderColor = ImVec4(0.25f, 0.45f, 0.75f, 1.0f);
+        ImVec4 statusTextColor = ImVec4(0.45f, 0.70f, 1.0f, 1.0f);
+        const char *statusTag = "Job (En attente)";
+
+        if (node.executionStatus == VisualJobStatus::Running)
+        {
+            nodeBgColor = ImVec4(0.22f, 0.12f, 0.32f, 0.95f);
+            borderColor = ImVec4(0.65f, 0.30f, 0.95f, 1.0f);
+            statusTextColor = ImVec4(0.80f, 0.50f, 1.0f, 1.0f);
+            statusTag = "Job (En cours...)";
+        }
+        else if (node.executionStatus == VisualJobStatus::Success)
+        {
+            nodeBgColor = ImVec4(0.10f, 0.24f, 0.16f, 0.95f);
+            borderColor = ImVec4(0.20f, 0.80f, 0.40f, 1.0f);
+            statusTextColor = ImVec4(0.30f, 0.90f, 0.50f, 1.0f);
+            statusTag = "Job (OK)";
+        }
+        else if (node.executionStatus == VisualJobStatus::Failed)
+        {
+            nodeBgColor = ImVec4(0.28f, 0.10f, 0.12f, 0.95f);
+            borderColor = ImVec4(0.90f, 0.25f, 0.25f, 1.0f);
+            statusTextColor = ImVec4(0.95f, 0.40f, 0.40f, 1.0f);
+            statusTag = "Job (KO)";
+        }
+
+        ed::PushStyleColor(ed::StyleColor_NodeBg, nodeBgColor);
+        ed::PushStyleColor(ed::StyleColor_NodeBorder, borderColor);
+        ed::PushStyleVar(ed::StyleVar_NodePadding, ImVec4(0.0f, 10.0f, 0.0f, 10.0f));
+        ed::PushStyleVar(ed::StyleVar_NodeRounding, 6.0f);
+
+        ed::BeginNode(node.id);
+        ImGui::BeginGroup();
+
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
+        ImGui::TextColored(statusTextColor, "%s  %s", ICON_LC_ACTIVITY, statusTag);
+
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.85f), "%s", node.taskName.c_str());
+
+        ImGui::Spacing();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+        if (ImGui::BeginTable("##WorkflowPinsTable", 2, ImGuiTableFlags_None, ImVec2(160.0f, 0.0f)))
+        {
+            ImGui::TableSetupColumn("InCol", ImGuiTableColumnFlags_WidthStretch, 0.5f);
+            ImGui::TableSetupColumn("OutCol", ImGuiTableColumnFlags_WidthStretch, 0.5f);
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() - 4.0f);
+            ed::PushStyleVar(ed::StyleVar_TargetDirection, ImVec2(-1.0f, 0.0f));
+            ed::PushStyleVar(ed::StyleVar_PinArrowSize, 10.0f);
+            ed::PushStyleVar(ed::StyleVar_PinArrowWidth, 6.0f);
+
+            ed::BeginPin(node.inputPinId, ed::PinKind::Input);
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(8.0f, 8.0f));
+            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(pos.x + 4.0f, pos.y + 4.0f), 3.5f, ImGui::ColorConvertFloat4ToU32(ImVec4(0.35f, 0.65f, 0.95f, 0.9f)));
+            ed::EndPin();
+            ed::PopStyleVar(3);
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 4.0f);
+            ed::PushStyleVar(ed::StyleVar_SourceDirection, ImVec2(1.0f, 0.0f));
+            ed::PushStyleVar(ed::StyleVar_PinArrowSize, 0.0f);
+
+            ed::BeginPin(node.outputPinId, ed::PinKind::Output);
+            ImVec2 pos_out = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(8.0f, 8.0f));
+            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(pos_out.x + 4.0f, pos_out.y + 4.0f), 3.5f, ImGui::ColorConvertFloat4ToU32(ImVec4(0.35f, 0.65f, 0.95f, 0.9f)));
+            ed::EndPin();
+            ed::PopStyleVar(2);
+
+            ImGui::EndTable();
+        }
+
+        ImGui::EndGroup();
+        ed::EndNode();
+
+        ed::PopStyleVar(2);
+        ed::PopStyleColor(2);
+
+        if (ImGui::IsItemHovered() && !node.statusMessage.empty())
+        {
+            ImGui::SetItemTooltip("Statut : %s", node.statusMessage.c_str());
+        }
+    }
+
+    // 4. Rendu des liens de dépendances
+    for (const auto &link : m_workflowLinks)
+    {
+        ed::Link(link.id, link.startPinId, link.endPinId, ImVec4(0.90f, 0.90f, 0.90f, 0.85f), 2.0f);
+    }
+
+    // 5. Création et suppression de liens / nœuds
+    if (ed::BeginCreate())
+    {
+        ed::PinId startPin, endPin;
+        if (ed::QueryNewLink(&startPin, &endPin))
+        {
+            if (ed::AcceptNewItem(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), 2.5f))
+            {
+                uintptr_t maxLinkId = 5000;
+                for (const auto &existingLink : m_workflowLinks)
+                {
+                    if (existingLink.id >= maxLinkId)
+                        maxLinkId = existingLink.id + 1;
+                }
+                m_workflowLinks.push_back(WorkflowJobLink{maxLinkId, startPin.Get(), endPin.Get()});
+            }
+        }
+    }
+    ed::EndCreate();
+    if (ed::BeginDelete())
+    {
+        ed::NodeId deletedNodeId;
+        while (ed::QueryDeletedNode(&deletedNodeId))
+        {
+            if (ed::AcceptDeletedItem())
+            {
+                std::erase_if(m_workflowNodes, [deletedNodeId](const WorkflowJobNode &n)
+                              { return n.id == deletedNodeId.Get(); });
+                std::erase_if(m_workflowLinks, [deletedNodeId](const WorkflowJobLink &l)
+                              { return (l.startPinId / 10 == deletedNodeId.Get()) || (l.endPinId / 10 == deletedNodeId.Get()); });
+            }
+        }
+    }
+    ed::EndDelete();
+    if (m_needsWorkflowCentering && !m_workflowNodes.empty())
+    {
+        ed::NavigateToContent(0.0f);
+        m_needsWorkflowCentering = false;
+    }
+    ed::End();
+    ed::SetCurrentEditor(nullptr);
+    if (ImGui::BeginDragDropTarget())
+    {
+        if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_WORKFLOW_TASK_NODE"))
+        {
+            pending_task_name = (const char *)payload->Data;
+            pending_mouse_pos = ImGui::GetMousePos();
+            has_pending_drop = true;
+        }
+        ImGui::EndDragDropTarget();
+    }
+    ImGui::EndChild();
+}
+
+void Application::renderWorkflowModals()
+{
+    // MODALE 1 : APERÇU DU JSON DU WORKFLOW
+    if (m_showWorkflowJsonModal)
+        ImGui::OpenPopup("Aperçu JSON du Workflow");
+    ImGui::SetNextWindowSize(ImVec2(700.0f, 450.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(450.0f, 250.0f), ImVec2(1600.0f, 900.0f));
+    if (ImGui::BeginPopupModal("Aperçu JSON du Workflow", &m_showWorkflowJsonModal, ImGuiWindowFlags_None))
+    {
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Structure JSON d'orchestration", ICON_LC_BOX);
+        ImGui::Separator();
+        ImGui::Spacing();
+        float text_area_height = ImGui::GetContentRegionAvail().y - 45.0f;
+        ImGui::InputTextMultiline("##WorkflowJsonPreviewArea",
+                                  const_cast<char *>(m_compiledWorkflowJson.c_str()), m_compiledWorkflowJson.length() + 1,
+                                  ImVec2(-1.0f, text_area_height), ImGuiInputTextFlags_ReadOnly);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
+        if (ImGui::Button("Fermer", ImVec2(120.0f, 0.0f)))
+        {
+            m_showWorkflowJsonModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    // MODALE 2 : ENREGISTREMENT DU WORKFLOW DANS LE PROJET
+    if (m_showSaveWorkflowModal)
+        ImGui::OpenPopup("Enregistrer le Workflow dans le Projet");
+    ImGui::SetNextWindowSize(ImVec2(460.0f, 240.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal("Enregistrer le Workflow dans le Projet", &m_showSaveWorkflowModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Ajout au catalogue des workflows", ICON_LC_FOLDER_OPEN);
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::Text("Nom du Workflow :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##WorkflowNameInput", m_saveWorkflowNameBuf, IM_ARRAYSIZE(m_saveWorkflowNameBuf));
+        ImGui::Spacing();
+        ImGui::Text("Description :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextMultiline("##WorkflowDescInput", m_saveWorkflowDescBuf, IM_ARRAYSIZE(m_saveWorkflowDescBuf), ImVec2(-1.0f, 60.0f));
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 230.0f);
+        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        {
+            m_showSaveWorkflowModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        {
+            if (strlen(m_saveWorkflowNameBuf) > 0)
+            {
+                strncpy(m_activeWorkflowNameBuf, m_saveWorkflowNameBuf, sizeof(m_activeWorkflowNameBuf) - 1);
+                m_activeWorkflowNameBuf[sizeof(m_activeWorkflowNameBuf) - 1] = '\0';
+                strncpy(m_activeWorkflowDescBuf, m_saveWorkflowDescBuf, sizeof(m_activeWorkflowDescBuf) - 1);
+                m_activeWorkflowDescBuf[sizeof(m_activeWorkflowDescBuf) - 1] = '\0';
+                std::string wfName(m_saveWorkflowNameBuf);
+                std::string wfDesc(m_saveWorkflowDescBuf);
+                std::string wfJson = compileWorkflowToJSON(wfName);
+                nlohmann::json wfVisualState;
+                wfVisualState["nodes"] = nlohmann::json::array();
+                ed::SetCurrentEditor(m_workflowContext);
+                for (const auto &n : m_workflowNodes)
+                {
+                    ImVec2 pos = ed::GetNodePosition(n.id);
+                    wfVisualState["nodes"].push_back({{"id", n.id},
+                                                      {"taskName", n.taskName},
+                                                      {"x", pos.x},
+                                                      {"y", pos.y},
+                                                      {"inputPinId", n.inputPinId},
+                                                      {"outputPinId", n.outputPinId}});
+                }
+                ed::SetCurrentEditor(nullptr);
+                wfVisualState["links"] = nlohmann::json::array();
+                for (const auto &l : m_workflowLinks)
+                {
+                    wfVisualState["links"].push_back({{"id", l.id},
+                                                      {"startPinId", l.startPinId},
+                                                      {"endPinId", l.endPinId}});
+                }
+                SavedWorkflow updatedWf{wfName, wfDesc, wfJson, wfVisualState};
+                auto it = std::find_if(m_savedWorkflows.begin(), m_savedWorkflows.end(),
+                                       [&wfName](const SavedWorkflow &w)
+                                       { return w.name == wfName; });
+                if (it != m_savedWorkflows.end())
+                    *it = std::move(updatedWf);
+                else
+                    m_savedWorkflows.push_back(std::move(updatedWf));
+                m_showSaveWorkflowModal = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndPopup();
+    }
+    // MODALE 3 : PARAMÈTRES D'EXÉCUTION DU WORKFLOW
+    if (m_showRunWorkflowModal)
+        ImGui::OpenPopup("Exécuter le Workflow");
+    ImGui::SetNextWindowSize(ImVec2(450.0f, 230.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal("Exécuter le Workflow", &m_showRunWorkflowModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextColored(ImVec4(0.3f, 0.85f, 0.45f, 1.0f), "%s  Configuration du contexte d'exécution", ICON_LC_PLAY);
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        std::vector<std::string> gatewayNames;
+
+        if (m_activeProject)
+        {
+            for (const auto &[gwName, gwObj] : m_activeProject->logicalConnections())
+            {
+                if (!gwName.empty())
+                    gatewayNames.push_back(gwName);
+            }
+        }
+        ImGui::Text("Connexion logique (Gateway) :");
+        ImGui::SetNextItemWidth(-1.0f);
+        if (gatewayNames.empty())
+        {
+            ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.4f, 1.0f), "Aucune connexion logique disponible dans le projet.");
+        }
+        else
+        {
+            if (m_selectedRunGatewayIndex >= static_cast<int>(gatewayNames.size()))
+
+                m_selectedRunGatewayIndex = 0;
+            if (ImGui::BeginCombo("##RunGatewayCombo", gatewayNames[m_selectedRunGatewayIndex].c_str()))
+            {
+                for (int i = 0; i < static_cast<int>(gatewayNames.size()); ++i)
+                {
+                    if (ImGui::Selectable(gatewayNames[i].c_str(), m_selectedRunGatewayIndex == i))
+                        m_selectedRunGatewayIndex = i;
+                }
+                ImGui::EndCombo();
+            }
+        }
+        ImGui::Spacing();
+        const char *envContexts[] = {"DEV", "TEST", "PROD"};
+        ImGui::Text("Environnement cible :");
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("##RunEnvContextCombo", envContexts[m_selectedRunContextIndex]))
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                if (ImGui::Selectable(envContexts[i], m_selectedRunContextIndex == i))
+                    m_selectedRunContextIndex = i;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 230.0f);
+        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        {
+            m_showRunWorkflowModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool canLaunch = !gatewayNames.empty();
+        if (!canLaunch)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Lancer", ImVec2(120.0f, 0.0f)))
+        {
+            launchWorkflowExecutionAsync(
+                gatewayNames[m_selectedRunGatewayIndex],
+                envContexts[m_selectedRunContextIndex]);
+            m_showRunWorkflowModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!canLaunch)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
 }

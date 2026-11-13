@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 project(dizui LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 
 # Force Clang + Ninja on Linux if not already set, but let user override
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -90,3 +91,35 @@ target_compile_options(dizui PRIVATE -Wall -Wextra -Wpedantic)
 
 # Copier le dossier des assets (contenant la police d'icônes) dans le dossier de build
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/assets" DESTINATION "${CMAKE_BINARY_DIR}")
+
+# ============================================================================
+# LIAISON AVEC LE BACKEND CPPSQLX
+# ============================================================================
+
+# 1. Définition des chemins vers votre projet cppsqlx
+set(CPPSQLX_DIR "/home/santili/cppsqlx/cppsqlx")
+
+# 2. Ajout des répertoires d'inclusions (En-têtes du framework + nlohmann_json partagé)
+target_include_directories(dizui PRIVATE 
+    ${CPPSQLX_DIR}/include
+    ${CPPSQLX_DIR}/build/_deps/json-src/include
+)
+
+# 3. Localisation et déclaration de la bibliothèque libcppsqlx.so générée
+find_library(CPPSQLX_LIB
+    NAMES cppsqlx
+    PATHS ${CPPSQLX_DIR}/build/src
+    REQUIRED
+)
+
+# 4. Liaison physique de l'exécutable dizui avec le framework backend et log4cxx
+target_link_libraries(dizui PRIVATE 
+    ${CPPSQLX_LIB}
+    log4cxx # Requis pour résoudre l'infrastructure de logs du backend
+)
+
+# 5. Configuration du RPATH pour que le binaire dizui trouve libcppsqlx.so à l'exécution
+set_target_properties(dizui PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "${CPPSQLX_DIR}/build/src"
+)
