@@ -4,10 +4,23 @@ project(dizui LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-
-# Force Clang + Ninja on Linux if not already set, but let user override
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(STATUS "Note: This project is optimized for Clang and Ninja.")
+endif()
+
+# ============================================================================
+# SUPPORT HOMEBREW SUR MACOS (Apple Silicon & Intel)
+# ============================================================================
+if(APPLE)
+    if(EXISTS "/opt/homebrew")
+        list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+        include_directories(SYSTEM "/opt/homebrew/include")
+        link_directories("/opt/homebrew/lib")
+    elseif(EXISTS "/usr/local")
+        list(APPEND CMAKE_PREFIX_PATH "/usr/local")
+        include_directories(SYSTEM "/usr/local/include")
+        link_directories("/usr/local/lib")
+    endif()
 endif()
 
 include(FetchContent)
@@ -40,8 +53,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui_node_editor)
 
-# --- Define Third-Party Library Targets (To Suppress Warnings) ---
-# ImGui Core + OpenGL3/GLFW Backends
+# --- Define Third-Party Library Targets ---
 add_library(imgui_src STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
@@ -56,10 +68,8 @@ target_include_directories(imgui_src SYSTEM PUBLIC
     ${imgui_SOURCE_DIR}/backends
 )
 target_link_libraries(imgui_src PUBLIC glfw)
-# Treat headers as SYSTEM to prevent warnings
 target_compile_options(imgui_src PRIVATE -w)
 
-# ImGui Node Editor
 add_library(imgui_node_editor_src STATIC
     ${imgui_node_editor_SOURCE_DIR}/crude_json.cpp
     ${imgui_node_editor_SOURCE_DIR}/imgui_canvas.cpp
@@ -78,47 +88,57 @@ file(GLOB_RECURSE PROJECT_SOURCES "src/*.cpp")
 
 add_executable(dizui ${PROJECT_SOURCES} ${PROJECT_HEADERS})
 
-# --- NOUVEAU : Injecter le chemin absolu des ressources au compilateur ---
 target_compile_definitions(dizui PRIVATE 
     DIZUI_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
 )
 
 target_include_directories(dizui PRIVATE include)
-target_link_libraries(dizui PRIVATE imgui_node_editor_src GL)
 
-# Strict compilation flags only for our project code
+# Détection multiplateforme d'OpenGL (Linux: GL / macOS: OpenGL::GL + Cocoa/IOKit)
+find_package(OpenGL REQUIRED)
+target_link_libraries(dizui PRIVATE imgui_node_editor_src OpenGL::GL)
+
+if(APPLE)
+    target_link_libraries(dizui PRIVATE "-framework Cocoa" "-framework IOKit" "-framework CoreVideo")
+endif()
+
 target_compile_options(dizui PRIVATE -Wall -Wextra -Wpedantic)
 
-# Copier le dossier des assets (contenant la police d'icônes) dans le dossier de build
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/assets" DESTINATION "${CMAKE_BINARY_DIR}")
 
 # ============================================================================
 # LIAISON AVEC LE BACKEND CPPSQLX
 # ============================================================================
+# Surchargeable via cmake -B build -DCPPSQLX_DIR=/chemin/vers/cppsqlx
+if(NOT DEFINED CPPSQLX_DIR)
+    if(EXISTS "/home/santili/cppsqlx/cppsqlx")
+        set(CPPSQLX_DIR "/home/santili/cppsqlx/cppsqlx" CACHE PATH "Chemin vers cppsqlx")
+    else()
+        set(CPPSQLX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cppsqlx" CACHE PATH "Chemin vers cppsqlx")
+    endif()
+endif()
 
-# 1. Définition des chemins vers votre projet cppsqlx
-set(CPPSQLX_DIR "/home/santili/cppsqlx/cppsqlx")
-
-# 2. Ajout des répertoires d'inclusions (En-têtes du framework + nlohmann_json partagé)
 target_include_directories(dizui PRIVATE 
     ${CPPSQLX_DIR}/include
     ${CPPSQLX_DIR}/build/_deps/json-src/include
 )
 
-# 3. Localisation et déclaration de la bibliothèque libcppsqlx.so générée
 find_library(CPPSQLX_LIB
     NAMES cppsqlx
     PATHS ${CPPSQLX_DIR}/build/src
     REQUIRED
 )
 
-# 4. Liaison physique de l'exécutable dizui avec le framework backend et log4cxx
-target_link_libraries(dizui PRIVATE 
-    ${CPPSQLX_LIB}
-    log4cxx # Requis pour résoudre l'infrastructure de logs du backend
+find_library(LOG4CXX_LIB
+    NAMES log4cxx
+    REQUIRED
 )
 
-# 5. Configuration du RPATH pour que le binaire dizui trouve libcppsqlx.so à l'exécution
+target_link_libraries(dizui PRIVATE 
+    ${CPPSQLX_LIB}
+    ${LOG4CXX_LIB}
+)
+
 set_target_properties(dizui PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE
     INSTALL_RPATH "${CPPSQLX_DIR}/build/src"
