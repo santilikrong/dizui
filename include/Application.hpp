@@ -97,6 +97,20 @@ private:
         cppsqlx::SQLOperator op = cppsqlx::SQLOperator::Equal;
         std::string value;
         uintptr_t connectedSrcPinId = 0;
+
+        // Nouveaux champs pour le mode Expression SQL avancée
+        bool isCustomExpression = false;
+        std::string customSqlCondition = ""; // Ex: "UPPER(emp.nom) LIKE 'M%' AND emp.actif = true"
+    };
+
+
+    struct VisualProjectionItem
+    {
+        uintptr_t id;
+        std::string alias;               // Nom de colonne en sortie (ex: "emp_nom", "nom_complet", "total_ca")
+        std::string sqlExpression;       // Expression SQL (ex: "emp.nom" ou "CONCAT(emp.prenom, ' ', emp.nom)")
+        bool isAggregate = false;        // Vrai si fonction d'agrégation (SUM, COUNT, AVG, MIN, MAX)
+        bool isCustomExpression = false; // Vrai si créé/édité via l'éditeur d'expressions (non lié à une case à cocher)
     };
 
     struct SavedQuery
@@ -137,6 +151,15 @@ private:
         nlohmann::json visualState;
     };
 
+    enum class AppTheme
+    {
+        DarkModern,
+        Light,
+        Nord,
+        Dracula
+    };
+
+
     // =========================================================================
     // 2. MÉTHODES DE RENDU DE L'INTERFACE (UI)
     // =========================================================================
@@ -172,6 +195,12 @@ private:
     void renderSaveProjectAsModal();
     void renderOpenProjectModal();
     void renderRenameModals();
+
+    void renderCanvasProjectionNode();
+    void renderExpressionEditorModal();
+        
+    void applyTheme(AppTheme theme);
+
 
     // =========================================================================
     // 3. MÉTHODES MÉTIER, COMPILATION ET PERSISTANCE
@@ -254,6 +283,9 @@ private:
     bool m_showPredicateModal = false;
     VisualQueryPredicate *m_editingPredicate = nullptr;
 
+    char m_whereExprFormulaBuf[1024] = "";
+
+
     bool m_showSQLPreviewModal = false;
     bool m_showSaveQueryModal = false;
     char m_saveQueryNameBuf[64] = "";
@@ -291,4 +323,22 @@ private:
     bool m_showRenameWorkflowModal = false;
     int m_renamingWorkflowIndex = -1;
     char m_renameWorkflowBuf[128] = "";
+
+
+    // Projection unifiée (SelectionSet) et Nœud de Transformation
+    std::vector<VisualProjectionItem> m_projectionItems;
+    bool m_hasProjectionNode = false;
+    ImVec2 m_projectionNodePos = ImVec2(650.0f, 120.0f);
+    bool m_needsProjectionPosInit = false;
+
+    // États de l'éditeur avancé d'expression SQL
+    bool m_showExpressionModal = false;
+    int m_editingProjectionIndex = -1; // -1 = nouvelle expression, >= 0 = édition d'un élément existant
+    char m_exprAliasBuf[128] = "";
+    char m_exprFormulaBuf[1024] = "";
+    bool m_exprIsAggregate = false;
+    
+    AppTheme m_currentTheme = AppTheme::DarkModern;
+
+
 };

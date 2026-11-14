@@ -49,6 +49,8 @@ Application::Application()
             m_activeProject->logicalConnections().insert_or_assign("Finance_DB_Gateway", std::move(mockGateway));
         }
     }
+
+    applyTheme(AppTheme::DarkModern); 
 }
 
 Application::~Application()
@@ -87,27 +89,52 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
     cppsqlx::SelectQuery query;
     std::vector<std::string> local_select_headers;
 
-    // Étape A : Clause SELECT
+    // Étape A : Clause SELECT unifiée (SQLSelectionSet)
+    cppsqlx::SQLSelectionSet selectionSet;
     bool has_selection = false;
-    for (const auto &node : m_visualQueryNodes)
+    bool has_aggregate = false;
+
+    if (!m_projectionItems.empty())
     {
-        if (!m_activeProject->datasets().contains(node.datasetName))
-            continue;
-        const auto &dataset = m_activeProject->datasets().at(node.datasetName);
-
-        for (size_t col_idx : node.selectedColumns)
+        for (const auto &item : m_projectionItems)
         {
-            if (dataset.columns().contains(col_idx))
+            if (item.sqlExpression.empty())
+                continue;
+
+            cppsqlx::SQLExpression expr = operator""_col(item.sqlExpression.c_str(), item.sqlExpression.length());
+            if (!item.alias.empty())
             {
-                std::string field_name = dataset.columns().at(col_idx).name();
-                std::string qualified_col = node.alias.empty() ? field_name : (node.alias + "." + field_name);
+                expr = expr.as(item.alias);
+            }
+            selectionSet.add(expr);
+            local_select_headers.push_back(item.alias.empty() ? item.sqlExpression : item.alias);
+            has_selection = true;
 
-                // Alias SQL valide avec underscore (ex: "emp_nom", "ag_nom", "reg_nom")
-                std::string unique_alias = node.alias.empty() ? field_name : (node.alias + "_" + field_name);
+            if (item.isAggregate)
+                has_aggregate = true;
+        }
+        query.select(selectionSet);
+    }
+    else
+    {
+        // Rétrocompatibilité avec les anciennes requêtes sans m_projectionItems
+        for (const auto &node : m_visualQueryNodes)
+        {
+            if (!m_activeProject->datasets().contains(node.datasetName))
+                continue;
+            const auto &dataset = m_activeProject->datasets().at(node.datasetName);
+            for (size_t col_idx : node.selectedColumns)
+            {
+                if (dataset.columns().contains(col_idx))
+                {
+                    std::string field_name = dataset.columns().at(col_idx).name();
+                    std::string qualified_col = node.alias.empty() ? field_name : (node.alias + "." + field_name);
+                    std::string unique_alias = node.alias.empty() ? field_name : (node.alias + "_" + field_name);
 
-                query.select(operator""_col(qualified_col.c_str(), qualified_col.length()).as(unique_alias));
-                local_select_headers.push_back(unique_alias);
-                has_selection = true;
+                    query.select(operator""_col(qualified_col.c_str(), qualified_col.length()).as(unique_alias));
+                    local_select_headers.push_back(unique_alias);
+                    has_selection = true;
+                }
             }
         }
     }
@@ -118,8 +145,8 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
         local_select_headers.push_back("*");
     }
 
-    // Mettre à jour immédiatement le cache des en-têtes d'UI pour le tableau bas
     m_queryResultHeaders = local_select_headers;
+
 
     // Étape B : Clause FROM
     const auto &root_node = m_visualQueryNodes.front();
@@ -247,12 +274,21 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
         std::cout << "[dizui Compiler] Warning : Certaines jointures sont orphelines et n'ont pu être ordonnées." << std::endl;
     }
 
+    // Étape D : Clause WHERE (Prédicats simples ET Expressions SQL avancées)
+     // =========================================================================
+    // Étape D : Clause WHERE (Prédicats simples ET Expressions SQL avancées)
     // =========================================================================
-    // Étape D : Clause WHERE (Prédicats) — MÉTHODES NOMMÉES CPPSQLX CORRIGÉES
-    // =========================================================================
+    std::string combinedWhereSql = "";
+
     for (const auto &pred : m_visualQueryPredicates)
     {
-        if (pred.connectedSrcPinId != 0 && !pred.value.empty())
+        std::string singlePredSql = "";
+
+        if (pred.isCustomExpression && !pred.customSqlCondition.empty())
+        {
+            singlePredSql = "(" + pred.customSqlCondition + ")";
+        }
+        else if (!pred.isCustomExpression && pred.connectedSrcPinId != 0 && !pred.value.empty())
         {
             uintptr_t table_node_id = pred.connectedSrcPinId / 1000;
             std::string live_pred_column = pred.targetColumn;
@@ -269,34 +305,23 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
                 }
             }
 
-            // 1. Instanciation de l'expression de colonne gauche (identifiant)
             cppsqlx::SQLExpression col_expr = operator""_col(live_pred_column.c_str(), live_pred_column.length());
 
-            // 2. Instanciation typée de la valeur de droite
             cppsqlx::SQLExpression val_expr;
             try
             {
-                // Si la chaîne saisie dans l'UI est un entier pur (ex: "1"), on utilise le constructeur d'entier
-                // pour que cppsqlx l'émette sous forme de constante numérique brute sans guillemets doubles.
                 size_t idx = 0;
                 long long num_val = std::stoll(pred.value, &idx);
                 if (idx == pred.value.length())
-                {
                     val_expr = cppsqlx::SQLExpression(static_cast<int64_t>(num_val));
-                }
                 else
-                {
-                    // Sinon, on instancie une chaîne SQL littérale via le constructeur de string
                     val_expr = cppsqlx::SQLExpression(pred.value);
-                }
             }
             catch (...)
             {
-                // En cas d'échec de conversion (chaîne de caractères pure), on construit l'expression textuelle
                 val_expr = cppsqlx::SQLExpression(pred.value);
             }
 
-            // 3. Construction de la structure WHERE binaire via vos méthodes membres
             cppsqlx::SQLExpression final_where_expr;
             if (pred.op == cppsqlx::SQLOperator::Equal)
                 final_where_expr = col_expr.equal(val_expr);
@@ -313,9 +338,37 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
             else
                 final_where_expr = col_expr.equal(val_expr);
 
-            query.where(final_where_expr);
+            singlePredSql = final_where_expr.toSQL();
+        }
+
+        if (!singlePredSql.empty())
+        {
+            if (combinedWhereSql.empty())
+                combinedWhereSql = singlePredSql;
+            else
+                combinedWhereSql += " AND " + singlePredSql;
         }
     }
+
+    if (!combinedWhereSql.empty())
+    {
+        query.where(cppsqlx::SQLExpression(combinedWhereSql));
+    }
+
+
+
+    // Étape E : GROUP BY automatique si une expression d'agrégation (SUM, COUNT, AVG...) est présente
+    if (has_aggregate)
+    {
+        for (const auto &item : m_projectionItems)
+        {
+            if (!item.isAggregate && !item.sqlExpression.empty())
+            {
+                query.groupBy(cppsqlx::SQLExpression(item.sqlExpression));
+            }
+        }
+    }
+
 
     ed::SetCurrentEditor(nullptr);
     return query;
@@ -543,11 +596,14 @@ bool Application::loadProjectFromFile(const std::string &filePath)
         m_visualQueryNodes.clear();
         m_visualQueryLinks.clear();
         m_visualQueryPredicates.clear();
+        m_projectionItems.clear();
+        m_hasProjectionNode = false;
         m_workflowNodes.clear();
         m_workflowLinks.clear();
         m_savedQueries.clear();
         m_savedTasks.clear();
         m_savedWorkflows.clear();
+
 
         // 3. Repeuplement des tâches depuis m_activeProject
         for (const auto &[tName, taskObj] : m_activeProject->tasks())
@@ -591,6 +647,42 @@ bool Application::loadProjectFromFile(const std::string &filePath)
             }
         }
 
+        // 5. Repli : si m_savedWorkflows est encore vide, reconstruction depuis m_activeProject->workflows()
+        if (m_savedWorkflows.empty() && !m_activeProject->workflows().empty())
+        {
+            for (const auto &[wfKey, wfObj] : m_activeProject->workflows())
+            {
+                SavedWorkflow swf;
+                swf.name = wfObj.name().empty() ? wfKey : wfObj.name();
+                swf.description = wfObj.context().description_;
+                swf.jsonPreview = wfObj.toJSON().dump(4);
+
+                nlohmann::json vs;
+                vs["nodes"] = nlohmann::json::array();
+                vs["links"] = nlohmann::json::array();
+
+                uintptr_t baseId = 2000;
+                for (const auto &jobPtr : wfObj.jobs())
+                {
+                    if (!jobPtr)
+                        continue;
+                    uintptr_t nid = baseId++;
+
+                    vs["nodes"].push_back({
+                        {"id", nid},
+                        {"taskName", jobPtr->name()},
+                        {"x", static_cast<float>(jobPtr->x())},
+                        {"y", static_cast<float>(jobPtr->y())},
+                        {"inputPinId", nid * 10},
+                        {"outputPinId", (nid * 10) + 1}
+                    });
+                }
+
+                swf.visualState = std::move(vs);
+                m_savedWorkflows.push_back(std::move(swf));
+            }
+        }
+
         std::string windowTitle = "dizui Studio - " + m_currentProjectName + " [" + m_currentProjectFilePath + "]";
         if (GLFWwindow *currentWin = glfwGetCurrentContext())
         {
@@ -598,8 +690,11 @@ bool Application::loadProjectFromFile(const std::string &filePath)
         }
 
         std::cout << "[dizui Info] Projet chargé (" << m_activeProject->datasets().size()
-                  << " datasets restaurés) : " << filePath << std::endl;
+                  << " datasets, " << m_savedQueries.size() << " requêtes, "
+                  << m_savedTasks.size() << " tâches, " << m_savedWorkflows.size()
+                  << " workflows restaurés) : " << filePath << std::endl;
         return true;
+
     }
     catch (const std::exception &e)
     {
@@ -610,6 +705,7 @@ bool Application::loadProjectFromFile(const std::string &filePath)
 
 void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
 {
+    m_projectionItems.clear(); m_hasProjectionNode = false;
     // Pré-remplissage des champs de sauvegarde avec les métadonnées de la requête éditée
     strncpy(m_saveQueryNameBuf, savedQuery.name.c_str(), sizeof(m_saveQueryNameBuf) - 1);
     m_saveQueryNameBuf[sizeof(m_saveQueryNameBuf) - 1] = '\0';
@@ -698,10 +794,66 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
             pred.op = static_cast<cppsqlx::SQLOperator>(pJson.value("op", 0));
             pred.value = pJson.value("value", "");
             pred.connectedSrcPinId = pJson.value("connectedSrcPinId", uintptr_t(0));
+            pred.isCustomExpression = pJson.value("isCustomExpression", false);
+            pred.customSqlCondition = pJson.value("customSqlCondition", "");
+
 
             m_visualQueryPredicates.push_back(std::move(pred));
         }
     }
+
+    // 5. Restauration de la projection unifiée et des expressions calculées
+    if (vState.contains("projections") && vState["projections"].is_array())
+    {
+        for (const auto &projJson : vState["projections"])
+        {
+            VisualProjectionItem item;
+            item.id = projJson.value("id", uintptr_t(0));
+            item.alias = projJson.value("alias", "");
+            item.sqlExpression = projJson.value("sqlExpression", "");
+            item.isAggregate = projJson.value("isAggregate", false);
+            item.isCustomExpression = projJson.value("isCustomExpression", false);
+            m_projectionItems.push_back(std::move(item));
+        }
+
+        m_hasProjectionNode = vState.value("hasProjectionNode", !m_projectionItems.empty());
+        if (m_hasProjectionNode)
+        {
+            m_projectionNodePos = ImVec2(
+                vState.value("projectionX", 650.0f),
+                vState.value("projectionY", 120.0f)
+            );
+            m_needsProjectionPosInit = true;
+        }
+    }
+    else if (!m_visualQueryNodes.empty() && m_activeProject)
+    {
+        // Rétrocompatibilité : reconstruit automatiquement m_projectionItems depuis les anciennes requêtes
+        for (const auto &node : m_visualQueryNodes)
+        {
+            if (!m_activeProject->datasets().contains(node.datasetName))
+                continue;
+            const auto &ds = m_activeProject->datasets().at(node.datasetName);
+            for (size_t colIdx : node.selectedColumns)
+            {
+                if (ds.columns().contains(colIdx))
+                {
+                    std::string colName = ds.columns().at(colIdx).name();
+                    std::string qual = node.alias.empty() ? colName : (node.alias + "." + colName);
+                    std::string defAlias = node.alias.empty() ? colName : (node.alias + "_" + colName);
+                    uintptr_t nextId = m_projectionItems.size() + 70000;
+                    m_projectionItems.push_back(VisualProjectionItem{nextId, defAlias, qual, false, false});
+                }
+            }
+        }
+        if (!m_projectionItems.empty())
+        {
+            m_hasProjectionNode = true;
+            m_projectionNodePos = ImVec2(650.0f, 120.0f);
+            m_needsProjectionPosInit = true;
+        }
+    }
+
 
     m_needsQueryCentering = true;
 
@@ -1107,6 +1259,112 @@ void Application::renderUI()
     renderGlobalModals();
 }
 
+void Application::applyTheme(AppTheme theme)
+{
+    m_currentTheme = theme;
+    ImGuiStyle &style = ImGui::GetStyle();
+    ImVec4 *colors = style.Colors;
+
+    style.WindowRounding = 5.0f;
+    style.FrameRounding = 4.0f;
+    style.PopupRounding = 5.0f;
+    style.ScrollbarRounding = 6.0f;
+    style.GrabRounding = 4.0f;
+
+    ImVec4 canvasBg;
+    ImVec4 canvasGrid;
+
+    switch (theme)
+    {
+    case AppTheme::Light:
+    {
+        ImGui::StyleColorsLight();
+        colors[ImGuiCol_WindowBg]         = ImVec4(0.95f, 0.96f, 0.98f, 1.00f);
+        colors[ImGuiCol_ChildBg]          = ImVec4(0.98f, 0.98f, 0.99f, 1.00f);
+        colors[ImGuiCol_PopupBg]          = ImVec4(1.00f, 1.00f, 1.00f, 0.98f);
+        colors[ImGuiCol_Border]           = ImVec4(0.80f, 0.82f, 0.86f, 1.00f);
+        colors[ImGuiCol_FrameBg]          = ImVec4(0.90f, 0.91f, 0.94f, 1.00f);
+        colors[ImGuiCol_Header]           = ImVec4(0.22f, 0.52f, 0.88f, 0.25f);
+        colors[ImGuiCol_HeaderHovered]    = ImVec4(0.22f, 0.52f, 0.88f, 0.40f);
+        colors[ImGuiCol_Button]           = ImVec4(0.86f, 0.88f, 0.92f, 1.00f);
+        colors[ImGuiCol_ButtonHovered]    = ImVec4(0.22f, 0.52f, 0.88f, 0.35f);
+        canvasBg   = ImVec4(0.92f, 0.93f, 0.96f, 1.00f);
+        canvasGrid = ImVec4(0.82f, 0.84f, 0.88f, 0.60f);
+        break;
+    }
+
+    case AppTheme::Nord:
+    {
+        ImGui::StyleColorsDark();
+        colors[ImGuiCol_Text]             = ImVec4(0.93f, 0.94f, 0.96f, 1.00f); // Snow Storm
+        colors[ImGuiCol_WindowBg]         = ImVec4(0.18f, 0.20f, 0.25f, 1.00f); // Polar Night #2E3440
+        colors[ImGuiCol_ChildBg]          = ImVec4(0.21f, 0.24f, 0.29f, 1.00f); // #3B4252
+        colors[ImGuiCol_PopupBg]          = ImVec4(0.18f, 0.20f, 0.25f, 0.98f);
+        colors[ImGuiCol_Border]           = ImVec4(0.30f, 0.34f, 0.42f, 1.00f); // #4C566A
+        colors[ImGuiCol_FrameBg]          = ImVec4(0.26f, 0.30f, 0.37f, 1.00f); // #434C5E
+        colors[ImGuiCol_TitleBgActive]    = ImVec4(0.37f, 0.51f, 0.67f, 1.00f); // Frost #5E81AC
+        colors[ImGuiCol_Header]           = ImVec4(0.53f, 0.75f, 0.82f, 0.30f); // Frost #88C0D0
+        colors[ImGuiCol_HeaderHovered]    = ImVec4(0.53f, 0.75f, 0.82f, 0.45f);
+        colors[ImGuiCol_Button]           = ImVec4(0.26f, 0.30f, 0.37f, 1.00f);
+        colors[ImGuiCol_ButtonHovered]    = ImVec4(0.37f, 0.51f, 0.67f, 0.65f);
+        canvasBg   = ImVec4(0.16f, 0.18f, 0.22f, 1.00f);
+        canvasGrid = ImVec4(0.26f, 0.30f, 0.37f, 0.50f);
+        break;
+    }
+
+    case AppTheme::Dracula:
+    {
+        ImGui::StyleColorsDark();
+        colors[ImGuiCol_Text]             = ImVec4(0.97f, 0.97f, 0.95f, 1.00f); // Foreground #F8F8F2
+        colors[ImGuiCol_WindowBg]         = ImVec4(0.16f, 0.16f, 0.21f, 1.00f); // Background #282A36
+        colors[ImGuiCol_ChildBg]          = ImVec4(0.19f, 0.20f, 0.26f, 1.00f);
+        colors[ImGuiCol_PopupBg]          = ImVec4(0.16f, 0.16f, 0.21f, 0.98f);
+        colors[ImGuiCol_Border]           = ImVec4(0.38f, 0.45f, 0.64f, 0.70f); // Comment #6272A4
+        colors[ImGuiCol_FrameBg]          = ImVec4(0.27f, 0.28f, 0.35f, 1.00f); // Current Line #44475A
+        colors[ImGuiCol_TitleBgActive]    = ImVec4(0.74f, 0.58f, 0.98f, 0.85f); // Purple #BD93F9
+        colors[ImGuiCol_Header]           = ImVec4(0.74f, 0.58f, 0.98f, 0.30f);
+        colors[ImGuiCol_HeaderHovered]    = ImVec4(1.00f, 0.47f, 0.78f, 0.40f); // Pink #FF79C6
+        colors[ImGuiCol_Button]           = ImVec4(0.27f, 0.28f, 0.35f, 1.00f);
+        colors[ImGuiCol_ButtonHovered]    = ImVec4(0.74f, 0.58f, 0.98f, 0.50f);
+        canvasBg   = ImVec4(0.13f, 0.14f, 0.18f, 1.00f);
+        canvasGrid = ImVec4(0.27f, 0.28f, 0.35f, 0.55f);
+        break;
+    }
+
+    case AppTheme::DarkModern:
+    default:
+    {
+        ImGui::StyleColorsDark();
+        colors[ImGuiCol_Text]             = ImVec4(0.92f, 0.93f, 0.95f, 1.00f);
+        colors[ImGuiCol_WindowBg]         = ImVec4(0.10f, 0.11f, 0.13f, 1.00f);
+        colors[ImGuiCol_ChildBg]          = ImVec4(0.12f, 0.13f, 0.16f, 1.00f);
+        colors[ImGuiCol_PopupBg]          = ImVec4(0.11f, 0.12f, 0.15f, 0.98f);
+        colors[ImGuiCol_Border]           = ImVec4(0.24f, 0.26f, 0.31f, 1.00f);
+        colors[ImGuiCol_FrameBg]          = ImVec4(0.17f, 0.19f, 0.23f, 1.00f);
+        colors[ImGuiCol_Header]           = ImVec4(0.20f, 0.45f, 0.75f, 0.35f);
+        colors[ImGuiCol_HeaderHovered]    = ImVec4(0.25f, 0.52f, 0.85f, 0.50f);
+        colors[ImGuiCol_Button]           = ImVec4(0.18f, 0.20f, 0.25f, 1.00f);
+        colors[ImGuiCol_ButtonHovered]    = ImVec4(0.25f, 0.52f, 0.85f, 0.45f);
+        canvasBg   = ImVec4(0.09f, 0.10f, 0.12f, 1.00f);
+        canvasGrid = ImVec4(0.22f, 0.24f, 0.28f, 0.45f);
+        break;
+    }
+    }
+
+    // Application des couleurs de grille sur les deux éditeurs de nœuds
+    auto applyNodeCanvasStyle = [&](ed::EditorContext *ctx)
+    {
+        if (!ctx) return;
+        ed::SetCurrentEditor(ctx);
+        ed::GetStyle().Colors[ed::StyleColor_Bg]   = canvasBg;
+        ed::GetStyle().Colors[ed::StyleColor_Grid] = canvasGrid;
+        ed::SetCurrentEditor(nullptr);
+    };
+
+    applyNodeCanvasStyle(m_queryContext);
+    applyNodeCanvasStyle(m_workflowContext);
+}
+
 
 void Application::renderLeftSidebar()
 {
@@ -1469,8 +1727,53 @@ void Application::renderProjectExplorerTree()
         drawLargeIconText(ICON_LC_BOX, "Gestionnaire de Packages", 14.0f);
         break;
     case ActiveTab::Settings:
+    {
         drawLargeIconText(ICON_LC_SETTINGS, "Paramètres de l'Application", 14.0f);
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "APPARENCE & THÈME VISUEL");
+        ImGui::Spacing();
+
+        const char *themeNames[] = {
+            "Sombre Moderne (Défaut)",
+            "Clair (Studio Light)",
+            "Nord (Arctique)",
+            "Dracula (Nocturne)"
+        };
+
+        int currentThemeIdx = static_cast<int>(m_currentTheme);
+        ImGui::Text("Palette de couleurs :");
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo("##AppThemeSelector", &currentThemeIdx, themeNames, IM_ARRAYSIZE(themeNames)))
+        {
+            applyTheme(static_cast<AppTheme>(currentThemeIdx));
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Boutons rapides de prévisualisation avec pastille de couleur
+        auto drawThemePresetCard = [&](const char *label, AppTheme targetTheme, ImVec4 swatchColor)
+        {
+            bool isSelected = (m_currentTheme == targetTheme);
+            ImGui::ColorButton(("##swatch_" + std::string(label)).c_str(), swatchColor, ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker, ImVec2(18.0f, 18.0f));
+            ImGui::SameLine();
+            if (ImGui::Selectable(label, isSelected))
+            {
+                applyTheme(targetTheme);
+            }
+        };
+
+        drawThemePresetCard("Sombre Moderne", AppTheme::DarkModern, ImVec4(0.10f, 0.11f, 0.13f, 1.0f));
+        drawThemePresetCard("Clair", AppTheme::Light, ImVec4(0.95f, 0.96f, 0.98f, 1.0f));
+        drawThemePresetCard("Nord", AppTheme::Nord, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
+        drawThemePresetCard("Dracula", AppTheme::Dracula, ImVec4(0.16f, 0.16f, 0.21f, 1.0f));
+
         break;
+    }
+
     }
     ImGui::End();
 }
@@ -2250,6 +2553,8 @@ void Application::renderQueryEditor()
         // Vidage des métadonnées de la requête en cours d'édition
         memset(m_saveQueryNameBuf, 0, sizeof(m_saveQueryNameBuf));
         memset(m_saveQueryDescBuf, 0, sizeof(m_saveQueryDescBuf));
+
+        m_projectionItems.clear(); m_hasProjectionNode = false;
     }
     ImGui::SetItemTooltip("Effacer intégralement le canevas et réinitialiser l'espace");
 
@@ -2440,8 +2745,32 @@ void Application::renderQueryEditor()
                                                     {"targetColumn", pred.targetColumn},
                                                     {"op", static_cast<int>(pred.op)},
                                                     {"value", pred.value},
-                                                    {"connectedSrcPinId", pred.connectedSrcPinId}});
+                                                    {"connectedSrcPinId", pred.connectedSrcPinId},
+                                                    {"isCustomExpression", pred.isCustomExpression},
+                                                    {"customSqlCondition", pred.customSqlCondition}});
                 }
+
+                // 4. Capture de la projection unifiée (colonnes ordonnées + expressions calculées)
+                vState["projections"] = nlohmann::json::array();
+                for (const auto &proj : m_projectionItems)
+                {
+                    vState["projections"].push_back({
+                        {"id", proj.id},
+                        {"alias", proj.alias},
+                        {"sqlExpression", proj.sqlExpression},
+                        {"isAggregate", proj.isAggregate},
+                        {"isCustomExpression", proj.isCustomExpression}
+                    });
+                }
+
+                vState["hasProjectionNode"] = m_hasProjectionNode;
+                if (m_hasProjectionNode)
+                {
+                    ImVec2 projPos = ed::GetNodePosition(99000);
+                    vState["projectionX"] = projPos.x;
+                    vState["projectionY"] = projPos.y;
+                }
+
                 ed::SetCurrentEditor(nullptr);
 
                 // 2. Création de l'objet mis à jour avec son état visuel ET son SelectQuery JSON
@@ -2485,6 +2814,7 @@ void Application::renderQueryCanvas(float canvas_height)
     renderCanvasDatasetNodes();
     renderCanvasFilterNodes();
     renderCanvasJoinNodes();
+    renderCanvasProjectionNode();
 
     // Passe C : Intercepteurs d'actions de l'éditeur (Création de liens, Suppressions)
     handleCanvasActions();
@@ -2579,10 +2909,38 @@ void Application::renderCanvasDatasetNodes()
                 bool is_selected = visualNode.selectedColumns.contains(index);
                 if (ImGui::Checkbox("##select_col", &is_selected))
                 {
+                    std::string raw_col_name = colObj.name();
+                    std::string qual_expr = visualNode.alias.empty() ? raw_col_name : (visualNode.alias + "." + raw_col_name);
+                    std::string default_alias = visualNode.alias.empty() ? raw_col_name : (visualNode.alias + "_" + raw_col_name);
+
                     if (is_selected)
+                    {
                         visualNode.selectedColumns.insert(index);
+
+                        // Ajout automatique dans la liste unifiée de projection si absent
+                        auto it = std::find_if(m_projectionItems.begin(), m_projectionItems.end(),
+                                               [&qual_expr](const VisualProjectionItem &item)
+                                               { return !item.isCustomExpression && item.sqlExpression == qual_expr; });
+                        if (it == m_projectionItems.end())
+                        {
+                            uintptr_t nextId = m_projectionItems.size() + 70000;
+                            m_projectionItems.push_back(VisualProjectionItem{nextId, default_alias, qual_expr, false, false});
+                        }
+
+                        // Affiche le nœud de projection sur le canevas dès la première sélection
+                        if (!m_hasProjectionNode)
+                        {
+                            m_hasProjectionNode = true;
+                            m_needsProjectionPosInit = true;
+                        }
+                    }
                     else
+                    {
                         visualNode.selectedColumns.erase(index);
+                        std::erase_if(m_projectionItems,
+                                      [&qual_expr](const VisualProjectionItem &item)
+                                      { return !item.isCustomExpression && item.sqlExpression == qual_expr; });
+                    }
                 }
                 ImGui::PopID();
 
@@ -2608,6 +2966,7 @@ void Application::renderCanvasDatasetNodes()
         ed::EndNode();
     }
 }
+
 
 void Application::renderCanvasFilterNodes()
 {
@@ -2651,9 +3010,20 @@ void Application::renderCanvasFilterNodes()
         }
 
         std::string op_symbol = std::string(cppsqlx::toSQL(predicateNode.op));
-        std::string summary = live_target_column + " " + op_symbol + " " + (predicateNode.value.empty() ? "?" : predicateNode.value);
-        if (summary.length() > 25)
-            summary = summary.substr(0, 22) + "...";
+        std::string summary;
+        if (predicateNode.isCustomExpression)
+        {
+            summary = predicateNode.customSqlCondition.empty() ? "Définir expression WHERE..." : predicateNode.customSqlCondition;
+        }
+        else
+        {
+            std::string op_symbol = std::string(cppsqlx::toSQL(predicateNode.op));
+            summary = live_target_column + " " + op_symbol + " " + (predicateNode.value.empty() ? "?" : predicateNode.value);
+        }
+
+        if (summary.length() > 28)
+            summary = summary.substr(0, 25) + "...";
+
 
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.35f, 0.9f, 0.25f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.35f, 0.9f, 0.45f));
@@ -2939,7 +3309,9 @@ void Application::renderQueryResultTable(float bottom_zone_height)
 
 void Application::renderQueryModals()
 {
-    // Modale 1 : Édition de la jointure
+    // =========================================================================
+    // MODALE 1 : ÉDITION DE LA JOINTURE (JOIN)
+    // =========================================================================
     if (m_showJoinModal && m_editingJoinLink != nullptr)
     {
         ImGui::OpenPopup("Éditeur de Clause de Jointure");
@@ -3040,16 +3412,25 @@ void Application::renderQueryModals()
         ImGui::EndPopup();
     }
 
-    // Modale 2 : Édition de la clause WHERE
+    // =========================================================================
+    // MODALE 2 : ÉDITION DE LA CLAUSE WHERE (SIMPLE OU EXPRESSION SQL AVANCÉE)
+    // =========================================================================
     if (m_showPredicateModal && m_editingPredicate != nullptr)
     {
         ImGui::OpenPopup("Configuration du Filtre WHERE");
     }
+
+    if (m_editingPredicate != nullptr && m_editingPredicate->isCustomExpression)
+        ImGui::SetNextWindowSize(ImVec2(860.0f, 440.0f), ImGuiCond_Appearing);
+    else
+        ImGui::SetNextWindowSize(ImVec2(520.0f, 240.0f), ImGuiCond_Appearing);
+
     if (ImGui::BeginPopupModal("Configuration du Filtre WHERE", &m_showPredicateModal, ImGuiWindowFlags_None))
     {
-        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s  Configuration de la Condition de Filtrage", ICON_LC_FILTER);
+        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s  Configuration de la Condition de Filtrage (WHERE)", ICON_LC_FILTER);
         ImGui::Separator();
         ImGui::Spacing();
+
         std::string modal_target_display = m_editingPredicate->targetColumn;
         if (m_editingPredicate->connectedSrcPinId != 0)
         {
@@ -3065,60 +3446,189 @@ void Application::renderQueryModals()
                 }
             }
         }
-        ImGui::TextDisabled("Champ cible :");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", modal_target_display.c_str());
+
+        // Case à cocher pour basculer entre Condition Simple et Expression SQL libre
+        if (ImGui::Checkbox("Mode Expression SQL Avancée (Condition libre, fonctions, LIKE, IN, AND/OR...)", &m_editingPredicate->isCustomExpression))
+        {
+            if (m_editingPredicate->isCustomExpression)
+            {
+                ImGui::SetWindowSize(ImVec2(860.0f, 440.0f));
+                if (m_editingPredicate->customSqlCondition.empty() && m_editingPredicate->connectedSrcPinId != 0)
+                {
+                    std::string initExpr = modal_target_display + " " +
+                                           std::string(cppsqlx::toSQL(m_editingPredicate->op)) + " " +
+                                           m_editingPredicate->value;
+                    strncpy(m_whereExprFormulaBuf, initExpr.c_str(), sizeof(m_whereExprFormulaBuf) - 1);
+                    m_whereExprFormulaBuf[sizeof(m_whereExprFormulaBuf) - 1] = '\0';
+                }
+            }
+            else
+            {
+                ImGui::SetWindowSize(ImVec2(520.0f, 240.0f));
+            }
+        }
+
         ImGui::Spacing();
         ImGui::Separator();
-        ImGui::Spacing();
-        ImGui::TextDisabled("ÉDITION DE L'EXPRESSION DE FILTRE");
         ImGui::Spacing();
 
-        if (ImGui::BeginTable("##predicate_expr_table", 2, ImGuiTableFlags_Resizable))
+        if (!m_editingPredicate->isCustomExpression)
         {
-            ImGui::TableSetupColumn("Opérateur", ImGuiTableColumnFlags_WidthStretch, 0.35f);
-            ImGui::TableSetupColumn("Valeur / Littéral", ImGuiTableColumnFlags_WidthStretch, 0.65f);
-            ImGui::TableHeadersRow();
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::SetNextItemWidth(-1.0f);
-            std::string_view current_op_symbol = cppsqlx::toSQL(m_editingPredicate->op);
-            if (ImGui::BeginCombo("##pred_op_combo", current_op_symbol.data()))
+            // -----------------------------------------------------------------
+            // MODE 1 : CONDITION SIMPLE (Colonne liée | Opérateur | Valeur)
+            // -----------------------------------------------------------------
+            ImGui::TextDisabled("Champ cible :");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", modal_target_display.c_str());
+            ImGui::Spacing();
+            ImGui::TextDisabled("ÉDITION DE L'EXPRESSION DE FILTRE");
+            ImGui::Spacing();
+
+            if (ImGui::BeginTable("##predicate_expr_table", 2, ImGuiTableFlags_Resizable))
             {
-                for (auto const &item : cppsqlx::operatorMap)
+                ImGui::TableSetupColumn("Opérateur", ImGuiTableColumnFlags_WidthStretch, 0.35f);
+                ImGui::TableSetupColumn("Valeur / Littéral", ImGuiTableColumnFlags_WidthStretch, 0.65f);
+                ImGui::TableHeadersRow();
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::SetNextItemWidth(-1.0f);
+                std::string_view current_op_symbol = cppsqlx::toSQL(m_editingPredicate->op);
+                if (ImGui::BeginCombo("##pred_op_combo", current_op_symbol.data()))
                 {
-                    if (cppsqlx::isLogical(item.op))
-                        continue;
-                    if (ImGui::Selectable(item.symbol.data(), m_editingPredicate->op == item.op))
+                    for (auto const &item : cppsqlx::operatorMap)
                     {
-                        m_editingPredicate->op = item.op;
+                        if (cppsqlx::isLogical(item.op))
+                            continue;
+                        if (ImGui::Selectable(item.symbol.data(), m_editingPredicate->op == item.op))
+                        {
+                            m_editingPredicate->op = item.op;
+                        }
                     }
+                    ImGui::EndCombo();
                 }
-                ImGui::EndCombo();
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(-1.0f);
+                char val_buf[256];
+                snprintf(val_buf, sizeof(val_buf), "%s", m_editingPredicate->value.c_str());
+                if (ImGui::InputText("##pred_value_input", val_buf, sizeof(val_buf)))
+                {
+                    m_editingPredicate->value = val_buf;
+                }
+                ImGui::EndTable();
             }
-            ImGui::TableSetColumnIndex(1);
-            ImGui::SetNextItemWidth(-1.0f);
-            char val_buf[256];
-            snprintf(val_buf, sizeof(val_buf), "%s", m_editingPredicate->value.c_str());
-            if (ImGui::InputText("##pred_value_input", val_buf, sizeof(val_buf)))
-            {
-                m_editingPredicate->value = val_buf;
-            }
-            ImGui::EndTable();
         }
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        float avail_x = ImGui::GetContentRegionAvail().x;
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
-        if (ImGui::Button("Enregistrer", ImVec2(120, 0)))
+        else
         {
-            m_editingPredicate->targetColumn = modal_target_display;
-            m_showPredicateModal = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
+// -----------------------------------------------------------------
+// MODE 2 : EXPRESSION SQL AVANCÉE (3 COLONNES)
+// -----------------------------------------------------------------
+if (strlen(m_whereExprFormulaBuf) == 0 && !m_editingPredicate->customSqlCondition.empty())
+{
+strncpy(m_whereExprFormulaBuf, m_editingPredicate->customSqlCondition.c_str(), sizeof(m_whereExprFormulaBuf) - 1);
+m_whereExprFormulaBuf[sizeof(m_whereExprFormulaBuf) - 1] = '\0';
+}
+float bodyHeight = ImGui::GetContentRegionAvail().y - 45.0f;
+if (bodyHeight < 180.0f)
+bodyHeight = 180.0f;
+auto appendToWhere = [&](const std::string &snippet)
+{
+size_t len = strlen(m_whereExprFormulaBuf);
+if (len + snippet.length() + 1 < sizeof(m_whereExprFormulaBuf))
+{
+strcat(m_whereExprFormulaBuf, snippet.c_str());
+}
+};
+// Colonne gauche : Champs du graphe
+ImGui::BeginChild("WhereFieldsPalette", ImVec2(220.0f, bodyHeight), true);
+ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "CHAMPS DU GRAPHE");
+ImGui::Separator();
+if (m_activeProject)
+{
+for (const auto &node : m_visualQueryNodes)
+{
+if (!m_activeProject->datasets().contains(node.datasetName))
+continue;
+const auto &ds = m_activeProject->datasets().at(node.datasetName);
+if (ImGui::TreeNodeEx((node.alias + " (" + node.datasetName + ")").c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+{
+for (const auto &[idx, col] : ds.columns())
+{
+std::string qual = node.alias + "." + col.name();
+if (ImGui::Selectable(qual.c_str()))
+{
+appendToWhere(qual);
+}
+}
+ImGui::TreePop();
+}
+}
+}
+ImGui::EndChild();
+ImGui::SameLine();
+// Colonne centrale : Zone de saisie de la condition SQL
+float centerWidth = ImGui::GetContentRegionAvail().x - 225.0f;
+ImGui::BeginChild("WhereFormulaZone", ImVec2(centerWidth, bodyHeight), true);
+ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "CONDITION SQL (EX: UPPER(emp.nom) LIKE 'M%')");
+ImGui::Separator();
+ImGui::InputTextMultiline("##WhereCustomMultiline", m_whereExprFormulaBuf, IM_ARRAYSIZE(m_whereExprFormulaBuf),
+ImVec2(-1.0f, bodyHeight - 35.0f), ImGuiInputTextFlags_AllowTabInput);
+ImGui::EndChild();
+ImGui::SameLine();
+// Colonne droite : Opérateurs et fonctions SQL
+ImGui::BeginChild("WhereOperatorsPalette", ImVec2(220.0f, bodyHeight), true);
+ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "OPÉRATEURS & FONCTIONS");
+ImGui::Separator();
+const char *whereSnippets[] = {
+" AND ", " OR ", " NOT ",
+" = ", " <> ", " > ", " < ", " >= ", " <= ",
+" LIKE '%'", " ILIKE '%'",
+" IN (, )", " NOT IN (, )",
+" BETWEEN  AND ",
+" IS NULL", " IS NOT NULL",
+"UPPER()", "LOWER()", "TRIM()",
+"COALESCE(, 0)", "EXTRACT(YEAR FROM )"
+};
+for (const char *snip : whereSnippets)
+{
+if (ImGui::Selectable(snip))
+{
+appendToWhere(snip);
+}
+}
+ImGui::EndChild();
+}
+ImGui::Spacing();
+ImGui::Separator();
+ImGui::Spacing();
+float avail_x = ImGui::GetContentRegionAvail().x;
+ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 230.0f);
+if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+{
+memset(m_whereExprFormulaBuf, 0, sizeof(m_whereExprFormulaBuf));
+m_showPredicateModal = false;
+ImGui::CloseCurrentPopup();
+}
+ImGui::SameLine();
+if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+{
+if (m_editingPredicate->isCustomExpression)
+{
+m_editingPredicate->customSqlCondition = std::string(m_whereExprFormulaBuf);
+memset(m_whereExprFormulaBuf, 0, sizeof(m_whereExprFormulaBuf));
+}
+else
+{
+m_editingPredicate->targetColumn = modal_target_display;
+}
+m_showPredicateModal = false;
+ImGui::CloseCurrentPopup();
+}
+ImGui::EndPopup();
+}
+// =========================================================================
+// MODALE 3 : ÉDITEUR AVANCÉ D'EXPRESSION SQL (SELECT / TRANSFORMATIONS)
+// =========================================================================
+renderExpressionEditorModal();
 }
 
 void Application::renderWorkflowEditor()
@@ -3612,3 +4122,289 @@ void Application::renderWorkflowModals()
         ImGui::EndPopup();
     }
 }
+
+
+void Application::renderCanvasProjectionNode()
+{
+    if (!m_hasProjectionNode && m_projectionItems.empty())
+        return;
+
+    const uintptr_t PROJECTION_NODE_ID = 99000;
+    if (m_needsProjectionPosInit)
+    {
+        m_needsProjectionPosInit = false;
+        ed::SetNodePosition(PROJECTION_NODE_ID, m_projectionNodePos);
+    }
+
+    ed::PushStyleColor(ed::StyleColor_NodeBg, ImVec4(0.14f, 0.20f, 0.28f, 0.92f));
+    ed::PushStyleColor(ed::StyleColor_NodeBorder, ImVec4(0.25f, 0.70f, 0.95f, 1.0f));
+    ed::PushStyleVar(ed::StyleVar_NodePadding, ImVec4(10.0f, 10.0f, 10.0f, 10.0f));
+    ed::PushStyleVar(ed::StyleVar_NodeRounding, 6.0f);
+
+    ed::BeginNode(PROJECTION_NODE_ID);
+    ImGui::BeginGroup();
+
+    // En-tête du nœud (sans chevauchement)
+    ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "%s  Projection [SELECT]", ICON_LC_LAYERS);
+    ImGui::SameLine(250.0f);
+    if (ImGui::SmallButton((std::string(ICON_LC_PLUS_CIRCLE) + " Expr").c_str()))
+    {
+        m_editingProjectionIndex = -1;
+        memset(m_exprAliasBuf, 0, sizeof(m_exprAliasBuf));
+        memset(m_exprFormulaBuf, 0, sizeof(m_exprFormulaBuf));
+        m_exprIsAggregate = false;
+        m_showExpressionModal = true;
+    }
+    ImGui::SetItemTooltip("Créer une nouvelle colonne calculée (Expression SQL)");
+
+    // Remplacement de ImGui::Separator() (qui débordait sur tout le canevas) par un espace net
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+
+    ImGui::Spacing();
+
+    if (m_projectionItems.empty())
+    {
+        ImGui::TextDisabled("Cochez des colonnes ou cliquez sur '+ Expr'");
+    }
+    else
+    {
+        int indexToDelete = -1;
+        int indexMoveUp = -1;
+        int indexMoveDown = -1;
+
+        for (int i = 0; i < static_cast<int>(m_projectionItems.size()); ++i)
+        {
+            auto &item = m_projectionItems[i];
+            ImGui::PushID(static_cast<int>(item.id) + i);
+
+            // Badge visuel : [fx] pour une expression calculée, [col] pour un champ brut
+            if (item.isCustomExpression)
+                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "[fx]");
+            else
+                ImGui::TextDisabled("[col]");
+
+            ImGui::SameLine();
+
+            // Résumé cliquable pour ouvrir l'éditeur d'expression / renommer l'alias
+            std::string displayLabel = item.alias + " = " + item.sqlExpression;
+            if (displayLabel.length() > 34)
+                displayLabel = displayLabel.substr(0, 31) + "...";
+
+            if (ImGui::Selectable(displayLabel.c_str(), false, ImGuiSelectableFlags_None, ImVec2(210.0f, 18.0f)))
+            {
+                m_editingProjectionIndex = i;
+                strncpy(m_exprAliasBuf, item.alias.c_str(), sizeof(m_exprAliasBuf) - 1);
+                m_exprAliasBuf[sizeof(m_exprAliasBuf) - 1] = '\0';
+                strncpy(m_exprFormulaBuf, item.sqlExpression.c_str(), sizeof(m_exprFormulaBuf) - 1);
+                m_exprFormulaBuf[sizeof(m_exprFormulaBuf) - 1] = '\0';
+                m_exprIsAggregate = item.isAggregate;
+                m_showExpressionModal = true;
+            }
+            ImGui::SetItemTooltip("Cliquer pour éditer l'alias ou la formule SQL :\n%s AS %s", item.sqlExpression.c_str(), item.alias.c_str());
+
+            // Boutons compacts d'ordonnancement et de suppression
+            ImGui::SameLine();
+            if (i > 0 && ImGui::SmallButton("^")) indexMoveUp = i;
+            ImGui::SameLine();
+            if (i + 1 < static_cast<int>(m_projectionItems.size()) && ImGui::SmallButton("v")) indexMoveDown = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x")) indexToDelete = i;
+
+            ImGui::PopID();
+        }
+
+        if (indexMoveUp > 0)
+            std::swap(m_projectionItems[indexMoveUp], m_projectionItems[indexMoveUp - 1]);
+        if (indexMoveDown >= 0)
+            std::swap(m_projectionItems[indexMoveDown], m_projectionItems[indexMoveDown + 1]);
+        if (indexToDelete >= 0)
+            m_projectionItems.erase(m_projectionItems.begin() + indexToDelete);
+    }
+
+    ImGui::EndGroup();
+    ed::EndNode();
+
+    ed::PopStyleVar(2);
+    ed::PopStyleColor(2);
+}
+
+
+void Application::renderExpressionEditorModal()
+{
+    if (m_showExpressionModal)
+        ImGui::OpenPopup("Éditeur Avancé d'Expression SQL");
+
+    ImGui::SetNextWindowSize(ImVec2(880.0f, 520.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(680.0f, 400.0f), ImVec2(1600.0f, 900.0f));
+
+    if (ImGui::BeginPopupModal("Éditeur Avancé d'Expression SQL", &m_showExpressionModal, ImGuiWindowFlags_None))
+    {
+        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "%s  Concepteur d'Expression & Transformation SQL (PostgreSQL)", ICON_LC_CPU);
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Nom de la colonne de sortie (Alias) + Case Agrégat
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("Alias de sortie (AS) :");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(260.0f);
+        ImGui::InputTextWithHint("##ExprAliasInput", "ex: nom_complet, total_ttc...", m_exprAliasBuf, IM_ARRAYSIZE(m_exprAliasBuf));
+
+        ImGui::SameLine(0.0f, 25.0f);
+        ImGui::Checkbox("Fonction d'agrégation (active le GROUP BY auto)", &m_exprIsAggregate);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float bodyHeight = ImGui::GetContentRegionAvail().y - 45.0f;
+
+        // COLONNE 1 (GAUCHE) : Colonnes du graphe disponibles pour insertion rapide
+        ImGui::BeginChild("ExprFieldsPalette", ImVec2(240.0f, bodyHeight), true);
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "CHAMPS DU GRAPHE");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        auto appendSnippetToFormula = [&](const std::string &snippet)
+        {
+            size_t curLen = strlen(m_exprFormulaBuf);
+            if (curLen + snippet.length() + 1 < sizeof(m_exprFormulaBuf))
+            {
+                strcat(m_exprFormulaBuf, snippet.c_str());
+            }
+        };
+
+        if (m_visualQueryNodes.empty())
+        {
+            ImGui::TextDisabled("Aucune table sur le canevas.");
+        }
+        else if (m_activeProject)
+        {
+            for (const auto &node : m_visualQueryNodes)
+            {
+                if (!m_activeProject->datasets().contains(node.datasetName))
+                    continue;
+                const auto &ds = m_activeProject->datasets().at(node.datasetName);
+                std::string header = node.alias + " (" + node.datasetName + ")";
+                if (ImGui::TreeNodeEx(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                {
+                    for (const auto &[idx, col] : ds.columns())
+                    {
+                        std::string qual = node.alias + "." + col.name();
+                        if (ImGui::Selectable(qual.c_str()))
+                        {
+                            appendSnippetToFormula(qual);
+                        }
+                        ImGui::SetItemTooltip("Cliquer pour insérer '%s'", qual.c_str());
+                    }
+                    ImGui::TreePop();
+                }
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        // COLONNE 2 (CENTRE) : Zone d'édition de la formule SQL
+        float centerWidth = ImGui::GetContentRegionAvail().x - 245.0f;
+        ImGui::BeginChild("ExprEditorZone", ImVec2(centerWidth, bodyHeight), true);
+        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "FORMULE SQL DE TRANSFORMATION");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float textAreaHeight = ImGui::GetContentRegionAvail().y - 35.0f;
+        ImGui::InputTextMultiline("##ExprFormulaMultiline", m_exprFormulaBuf, IM_ARRAYSIZE(m_exprFormulaBuf),
+                                  ImVec2(-1.0f, textAreaHeight), ImGuiInputTextFlags_AllowTabInput);
+
+        ImGui::TextDisabled("Astuce : Cliquez sur un champ à gauche ou une fonction à droite pour l'insérer.");
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        // COLONNE 3 (DROITE) : Catalogue de fonctions SQL prêtes à l'emploi
+        ImGui::BeginChild("ExprFunctionsCatalog", ImVec2(235.0f, bodyHeight), true);
+        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "FONCTIONS SQL");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        struct SqlFuncTemplate { const char *label; const char *snippet; bool isAgg; };
+        const SqlFuncTemplate funcs[] = {
+            {"CONCAT(a, ' ', b)", "CONCAT(, ' ', )", false},
+            {"UPPER(str)", "UPPER()", false},
+            {"LOWER(str)", "LOWER()", false},
+            {"TRIM(str)", "TRIM()", false},
+            {"SUBSTRING(str, 1, 3)", "SUBSTRING(, 1, 3)", false},
+            {"COALESCE(val, 0)", "COALESCE(, 0)", false},
+            {"CASE WHEN ... END", "CASE WHEN  THEN  ELSE  END", false},
+            {"ROUND(num, 2)", "ROUND(, 2)", false},
+            {"CAST(... AS NUMERIC)", "CAST( AS NUMERIC)", false},
+            {"EXTRACT(YEAR FROM d)", "EXTRACT(YEAR FROM )", false},
+            {"TO_CHAR(d, 'YYYY-MM')", "TO_CHAR(, 'YYYY-MM')", false},
+            {"SUM(col)", "SUM()", true},
+            {"COUNT(col)", "COUNT()", true},
+            {"COUNT(DISTINCT col)", "COUNT(DISTINCT )", true},
+            {"AVG(col)", "AVG()", true},
+            {"MIN(col)", "MIN()", true},
+            {"MAX(col)", "MAX()", true}
+        };
+
+        for (const auto &fn : funcs)
+        {
+            if (ImGui::Selectable(fn.label))
+            {
+                appendSnippetToFormula(fn.snippet);
+                if (fn.isAgg)
+                    m_exprIsAggregate = true;
+            }
+            ImGui::SetItemTooltip("Insérer : %s", fn.snippet);
+        }
+        ImGui::EndChild();
+
+        // PIED DE PAGE : Annuler / Valider
+        ImGui::Separator();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 230.0f);
+
+        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        {
+            m_showExpressionModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+
+        bool isValid = (strlen(m_exprAliasBuf) > 0) && (strlen(m_exprFormulaBuf) > 0);
+        if (!isValid)
+            ImGui::BeginDisabled();
+
+        if (ImGui::Button("Valider", ImVec2(120.0f, 0.0f)))
+        {
+            std::string aliasStr(m_exprAliasBuf);
+            std::string formulaStr(m_exprFormulaBuf);
+
+            if (m_editingProjectionIndex >= 0 && m_editingProjectionIndex < static_cast<int>(m_projectionItems.size()))
+            {
+                auto &target = m_projectionItems[m_editingProjectionIndex];
+                target.alias = aliasStr;
+                target.sqlExpression = formulaStr;
+                target.isAggregate = m_exprIsAggregate;
+                target.isCustomExpression = true;
+            }
+            else
+            {
+                uintptr_t nextId = m_projectionItems.size() + 70000;
+                m_projectionItems.push_back(VisualProjectionItem{
+                    nextId, aliasStr, formulaStr, m_exprIsAggregate, true});
+                m_hasProjectionNode = true;
+            }
+
+            m_showExpressionModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        if (!isValid)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+}
+
