@@ -17,9 +17,48 @@ RenderEngine::RenderEngine(GLFWwindow *window)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
-    const char *font_path = "/home/santili/.fonts/JetBrainsMono-Regular.ttf";
-    std::filesystem::path absolute_font_path = std::filesystem::path(DIZUI_ASSETS_DIR) / "lucide.ttf";
-    bool has_lucide = std::filesystem::exists(absolute_font_path) && std::filesystem::file_size(absolute_font_path) > 0;
+    // -------------------------------------------------------------------------
+    // 0. RECHERCHE MULTIPLATEFORME DE LA POLICE PRINCIPALE (Linux / macOS)
+    // -------------------------------------------------------------------------
+    std::string resolved_font_path = "";
+
+#ifdef __APPLE__
+    std::string home_font = "";
+    if (const char *home = std::getenv("HOME"))
+        home_font = std::string(home) + "/Library/Fonts/JetBrainsMono-Regular.ttf";
+
+    for (const auto &candidate : {
+             home_font,
+             std::string("/Library/Fonts/JetBrainsMono-Regular.ttf"),
+             std::string("/System/Library/Fonts/Supplemental/Menlo.ttc"),
+             std::string("/System/Library/Fonts/Supplemental/Arial.ttf"),
+             std::string("/System/Library/Fonts/Helvetica.ttc")})
+#else
+    std::string home_font_1 = "";
+    std::string home_font_2 = "";
+    if (const char *home = std::getenv("HOME"))
+    {
+        home_font_1 = std::string(home) + "/.fonts/JetBrainsMono-Regular.ttf";
+        home_font_2 = std::string(home) + "/.local/share/fonts/JetBrainsMono-Regular.ttf";
+    }
+
+    for (const auto &candidate : {
+             home_font_1,
+             home_font_2,
+             std::string("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+             std::string("/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf")})
+#endif
+    {
+        if (!candidate.empty() && std::filesystem::exists(candidate) && std::filesystem::file_size(candidate) > 0)
+        {
+            resolved_font_path = candidate;
+            break;
+        }
+    }
+
+
+    std::filesystem::path absolute_icon_path = std::filesystem::path(DIZUI_ASSETS_DIR) / "lucide.ttf";
+    bool has_lucide = std::filesystem::exists(absolute_icon_path) && std::filesystem::file_size(absolute_icon_path) > 0;
 
     // Configuration de base pour la fusion des icônes Lucide
     ImFontConfig icons_config;
@@ -33,43 +72,52 @@ RenderEngine::RenderEngine(GLFWwindow *window)
     // 1. CHARGEMENT DE LA POLICE PRINCIPALE (18.0f) + FUSION LUCIDE
     // -------------------------------------------------------------------------
     ImFont *main_font = nullptr;
-    if (std::filesystem::exists(font_path))
+    if (!resolved_font_path.empty())
     {
-        main_font = io.Fonts->AddFontFromFileTTF(font_path, 18.0f);
+        main_font = io.Fonts->AddFontFromFileTTF(resolved_font_path.c_str(), 18.0f);
     }
-    else
+
+    if (main_font == nullptr)
     {
-        main_font = io.Fonts->AddFontDefault();
+        // Taille explicite obligatoire pour autoriser MergeMode avec ImGui docking récent
+        ImFontConfig default_cfg;
+        default_cfg.SizePixels = 18.0f;
+        main_font = io.Fonts->AddFontDefault(&default_cfg);
     }
 
     if (has_lucide && main_font != nullptr)
     {
-        // Associe les icônes à la police principale active dans tout l'IDE
-        io.Fonts->AddFontFromFileTTF(absolute_font_path.string().c_str(), 20.0f, &icons_config, icons_ranges);
+        io.Fonts->AddFontFromFileTTF(absolute_icon_path.string().c_str(), 20.0f, &icons_config, icons_ranges);
     }
 
     // -------------------------------------------------------------------------
-    // 2. CHARGEMENT DE LA POLICE COMPACTE COMBOBOX (13.0f) + FUSION LUCIDE
+    // 2. CHARGEMENT DE LA POLICE COMPACTE COMBOBOX (15.0f) + FUSION LUCIDE
     // -------------------------------------------------------------------------
     ImFont *small_font = nullptr;
-    if (std::filesystem::exists(font_path))
+    if (!resolved_font_path.empty())
     {
-        small_font = io.Fonts->AddFontFromFileTTF(font_path, 15.0f);
+        small_font = io.Fonts->AddFontFromFileTTF(resolved_font_path.c_str(), 15.0f);
+    }
 
-        if (has_lucide && small_font != nullptr)
-        {
-            // Associe ÉGALEMENT les icônes à la petite police pour qu'elles s'affichent dans les combos
-            io.Fonts->AddFontFromFileTTF(absolute_font_path.string().c_str(), 14.0f, &icons_config, icons_ranges);
-        }
+    if (small_font == nullptr)
+    {
+        ImFontConfig small_default_cfg;
+        small_default_cfg.SizePixels = 15.0f;
+        small_font = io.Fonts->AddFontDefault(&small_default_cfg);
+    }
+
+    if (has_lucide && small_font != nullptr)
+    {
+        io.Fonts->AddFontFromFileTTF(absolute_icon_path.string().c_str(), 14.0f, &icons_config, icons_ranges);
     }
 
     if (has_lucide)
     {
-        std::cout << "[dizui Info] Lucide Icons chargé et fusionné sur toutes les tailles avec succès !" << std::endl;
+        std::cout << "[dizui Info] Lucide Icons chargé et fusionné avec succès !" << std::endl;
     }
     else
     {
-        std::cerr << "[dizui Error] Fichier d'icônes introuvable : " << absolute_font_path << std::endl;
+        std::cerr << "[dizui Error] Fichier d'icônes introuvable : " << absolute_icon_path << std::endl;
     }
 
     // Configuration de style d'interface
@@ -86,7 +134,7 @@ RenderEngine::RenderEngine(GLFWwindow *window)
 #endif
     ImGui_ImplOpenGL3_Init(glsl_version);
 }
-// Le reste des fonctions du fichier reste identique...
+
 
 RenderEngine::~RenderEngine()
 {

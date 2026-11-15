@@ -109,7 +109,18 @@ file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/assets" DESTINATION "${CMAKE_BINARY_DIR}"
 # ============================================================================
 # LIAISON AVEC LE BACKEND CPPSQLX
 # ============================================================================
-# Surchargeable via cmake -B build -DCPPSQLX_DIR=/chemin/vers/cppsqlx
+if(APPLE)
+    if(EXISTS "/opt/homebrew/opt/libpq")
+        set(PostgreSQL_ROOT "/opt/homebrew/opt/libpq")
+        list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew" "/opt/homebrew/opt/libpq")
+    elseif(EXISTS "/usr/local/opt/libpq")
+        set(PostgreSQL_ROOT "/usr/local/opt/libpq")
+        list(APPEND CMAKE_PREFIX_PATH "/usr/local" "/usr/local/opt/libpq")
+    endif()
+endif()
+
+find_package(PostgreSQL REQUIRED)
+
 if(NOT DEFINED CPPSQLX_DIR)
     if(EXISTS "/home/santili/cppsqlx/cppsqlx")
         set(CPPSQLX_DIR "/home/santili/cppsqlx/cppsqlx" CACHE PATH "Chemin vers cppsqlx")
@@ -121,6 +132,7 @@ endif()
 target_include_directories(dizui PRIVATE 
     ${CPPSQLX_DIR}/include
     ${CPPSQLX_DIR}/build/_deps/json-src/include
+    ${PostgreSQL_INCLUDE_DIRS}
 )
 
 find_library(CPPSQLX_LIB
@@ -137,6 +149,7 @@ find_library(LOG4CXX_LIB
 target_link_libraries(dizui PRIVATE 
     ${CPPSQLX_LIB}
     ${LOG4CXX_LIB}
+    PostgreSQL::PostgreSQL
 )
 
 set_target_properties(dizui PROPERTIES
