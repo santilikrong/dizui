@@ -198,6 +198,8 @@ private:
 
     void renderCanvasProjectionNode();
     void renderExpressionEditorModal();
+
+    void renderConnectionModals();
         
     void applyTheme(AppTheme theme);
 
@@ -220,6 +222,8 @@ private:
     bool loadProjectFromFile(const std::string &filePath);
     void loadQueryIntoVisualDesigner(const SavedQuery &savedQuery);
     void loadWorkflowIntoVisualDesigner(const SavedWorkflow &savedWorkflow);
+    void createNewProject(const std::string &projectName = "Nouveau_Projet");
+
 
     // =========================================================================
     // 4. ATTRIBUTS MEMBRES (ÉTAT DE L'APPLICATION)
@@ -337,6 +341,39 @@ private:
     char m_exprAliasBuf[128] = "";
     char m_exprFormulaBuf[1024] = "";
     bool m_exprIsAggregate = false;
+
+    // Modale : Créer / Éditer une Connexion Physique
+    bool m_showPhysConnModal = false;
+    bool m_isEditingPhysConn = false;
+    std::string m_originalPhysConnName = "";
+    char m_physConnNameBuf[128] = "";
+    char m_physConnHostBuf[128] = "localhost";
+    int m_physConnPort = 5432;
+    char m_physConnDbNameBuf[128] = "";
+    char m_physConnUserBuf[128] = "";
+    char m_physConnPassBuf[128] = "";
+    std::string m_physConnTestStatus = "";
+    bool m_physConnTestOk = false;
+
+    // Modale : Renommer une Connexion Physique
+    bool m_showRenamePhysConnModal = false;
+    std::string m_renamingPhysConnOldName = "";
+    char m_renamePhysConnBuf[128] = "";
+
+    // Modale : Créer / Éditer une Passerelle Logique (Gateway)
+    bool m_showLogConnModal = false;
+    bool m_isEditingLogConn = false;
+    std::string m_originalLogConnName = "";
+    char m_logConnNameBuf[128] = "";
+    std::string m_logConnDevTarget = "";
+    std::string m_logConnTestTarget = "";
+    std::string m_logConnProdTarget = "";
+
+    // Modale : Renommer une Passerelle Logique
+    bool m_showRenameLogConnModal = false;
+    std::string m_renamingLogConnOldName = "";
+    char m_renameLogConnBuf[128] = "";
+
     
     AppTheme m_currentTheme = AppTheme::DarkModern;
 

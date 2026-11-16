@@ -55,6 +55,12 @@ Application::Application()
         }
     }
 
+    if (!m_activeProject)
+    {
+        createNewProject("Nouveau_Projet");
+    }
+
+
     applyTheme(AppTheme::DarkModern); 
 }
 
@@ -81,6 +87,57 @@ void Application::run()
         m_windowManager->swapBuffers();
     }
 }
+
+void Application::createNewProject(const std::string &projectName)
+{
+    m_activeProject = std::make_unique<cppsqlx::DataIntegrationProject>();
+    m_activeProject->setName(projectName);
+
+    m_currentProjectName = projectName;
+    m_currentProjectFilePath = "";
+    // ... reste de la méthode inchangé ...
+
+    m_selectedGateway = "";
+    m_selectedContext = "";
+
+    // Réinitialisation des catalogues
+    m_savedQueries.clear();
+    m_savedTasks.clear();
+    m_savedWorkflows.clear();
+
+    // Nettoyage du Query Designer
+    m_visualQueryNodes.clear();
+    m_visualQueryLinks.clear();
+    m_visualQueryPredicates.clear();
+    m_projectionItems.clear();
+    m_hasProjectionNode = false;
+    m_queryResultHeaders.clear();
+    m_queryResultRows.clear();
+    m_executionError = "";
+    m_compiledSQLPreview = "";
+
+    // Nettoyage du Workflow Designer
+    m_workflowNodes.clear();
+    m_workflowLinks.clear();
+    strncpy(m_activeWorkflowNameBuf, "Mon_Workflow", sizeof(m_activeWorkflowNameBuf) - 1);
+    m_activeWorkflowNameBuf[sizeof(m_activeWorkflowNameBuf) - 1] = '\0';
+    memset(m_activeWorkflowDescBuf, 0, sizeof(m_activeWorkflowDescBuf));
+    m_compiledWorkflowJson = "";
+
+    {
+        std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
+        m_liveJobStatuses.clear();
+        m_liveJobMessages.clear();
+    }
+
+    // Mise à jour du titre de la fenêtre
+    std::string windowTitle = "dizui Studio - " + m_currentProjectName + " [Non enregistré]";
+    if (GLFWwindow *currentWin = glfwGetCurrentContext())
+    {
+        glfwSetWindowTitle(currentWin, windowTitle.c_str());
+    }
+}
+
 
 cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
 {
@@ -1127,6 +1184,14 @@ void Application::renderUI()
         ImGui::Spacing();
         if (ImGui::BeginMenu("File"))
         {
+
+            if (ImGui::MenuItem((std::string(ICON_LC_FILE_PLUS) + "  Nouveau projet").c_str(), "Ctrl+N"))
+            {
+                createNewProject("Nouveau_Projet");
+            }
+            ImGui::Separator();
+
+
             if (ImGui::MenuItem("Ouvrir...", "Ctrl+O"))
             {
                 if (!m_currentProjectFilePath.empty())
@@ -1461,21 +1526,136 @@ void Application::renderProjectExplorerTree()
                 ImGui::Spacing();
 
                 // 1. Connexions Physiques
-                if (ImGui::TreeNode("Connexions Physiques"))
+                ImGui::PushID("PhysConnsRoot");
+                bool phys_open = ImGui::TreeNode("Connexions Physiques");
+                if (ImGui::BeginPopupContextItem("PhysConnsRootContext", ImGuiPopupFlags_MouseButtonRight))
                 {
+                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  Créer une connexion physique...").c_str()))
+                    {
+                        m_isEditingPhysConn = false;
+                        m_originalPhysConnName = "";
+                        memset(m_physConnNameBuf, 0, sizeof(m_physConnNameBuf));
+                        strncpy(m_physConnHostBuf, "localhost", sizeof(m_physConnHostBuf) - 1);
+                        m_physConnPort = 5432;
+                        memset(m_physConnDbNameBuf, 0, sizeof(m_physConnDbNameBuf));
+                        memset(m_physConnUserBuf, 0, sizeof(m_physConnUserBuf));
+                        memset(m_physConnPassBuf, 0, sizeof(m_physConnPassBuf));
+                        m_physConnTestStatus = "";
+                        m_showPhysConnModal = true;
+                    }
+                    ImGui::EndPopup();
+                }
+
+                if (phys_open)
+                {
+                    std::string physToDelete = "";
                     for (const auto &[name, physConn] : m_activeProject->physicalConnections())
                     {
-                        drawLargeIconText(ICON_LC_SERVER, (name + " (" + physConn.dbname_ + ")").c_str(), 12.0f);
+                        ImGui::PushID(name.c_str());
+                        std::string rowLabel = std::string(ICON_LC_SERVER) + "  " + name + " (" + physConn.dbname_ + ")";
+                        ImGui::Selectable(rowLabel.c_str(), false);
+
+                        if (ImGui::BeginPopupContextItem("PhysConnItemContext", ImGuiPopupFlags_MouseButtonRight))
+                        {
+                            if (ImGui::MenuItem("Éditer la connexion"))
+                            {
+                                m_isEditingPhysConn = true;
+                                m_originalPhysConnName = name;
+                                strncpy(m_physConnNameBuf, name.c_str(), sizeof(m_physConnNameBuf) - 1);
+                                strncpy(m_physConnHostBuf, physConn.dbhost_.c_str(), sizeof(m_physConnHostBuf) - 1);
+                                m_physConnPort = physConn.dbport_;
+                                strncpy(m_physConnDbNameBuf, physConn.dbname_.c_str(), sizeof(m_physConnDbNameBuf) - 1);
+                                strncpy(m_physConnUserBuf, physConn.dbuser_.c_str(), sizeof(m_physConnUserBuf) - 1);
+                                strncpy(m_physConnPassBuf, physConn.dbpassword_.c_str(), sizeof(m_physConnPassBuf) - 1);
+                                m_physConnTestStatus = "";
+                                m_showPhysConnModal = true;
+                            }
+
+                            if (ImGui::MenuItem("Renommer la connexion"))
+                            {
+                                m_renamingPhysConnOldName = name;
+                                strncpy(m_renamePhysConnBuf, name.c_str(), sizeof(m_renamePhysConnBuf) - 1);
+                                m_showRenamePhysConnModal = true;
+                            }
+
+                            ImGui::Separator();
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+                            if (ImGui::MenuItem("Supprimer la connexion"))
+                            {
+                                physToDelete = name;
+                            }
+                            ImGui::PopStyleColor();
+                            ImGui::EndPopup();
+                        }
+                        ImGui::PopID();
+                    }
+
+                    if (!physToDelete.empty())
+                    {
+                        m_activeProject->physicalConnections().erase(physToDelete);
                     }
                     ImGui::TreePop();
                 }
+                ImGui::PopID();
 
                 // 2. Passerelles Logiques
-                if (ImGui::TreeNode("Passerelles Logiques"))
+                ImGui::PushID("LogConnsRoot");
+                bool log_open = ImGui::TreeNode("Passerelles Logiques");
+                if (ImGui::BeginPopupContextItem("LogConnsRootContext", ImGuiPopupFlags_MouseButtonRight))
                 {
+                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  Créer une connexion logique...").c_str()))
+                    {
+                        m_isEditingLogConn = false;
+                        m_originalLogConnName = "";
+                        memset(m_logConnNameBuf, 0, sizeof(m_logConnNameBuf));
+                        m_logConnDevTarget = "";
+                        m_logConnTestTarget = "";
+                        m_logConnProdTarget = "";
+                        m_showLogConnModal = true;
+                    }
+                    ImGui::EndPopup();
+                }
+
+                if (log_open)
+                {
+                    std::string logToDelete = "";
                     for (const auto &[name, logConn] : m_activeProject->logicalConnections())
                     {
-                        if (ImGui::TreeNode(name.c_str()))
+                        ImGui::PushID(name.c_str());
+                        bool gwNodeOpen = ImGui::TreeNode(name.c_str());
+
+                        if (ImGui::BeginPopupContextItem("LogConnItemContext", ImGuiPopupFlags_MouseButtonRight))
+                        {
+                            if (ImGui::MenuItem("Éditer la connexion"))
+                            {
+                                m_isEditingLogConn = true;
+                                m_originalLogConnName = name;
+                                strncpy(m_logConnNameBuf, name.c_str(), sizeof(m_logConnNameBuf) - 1);
+                                const auto &envs = logConn.environments();
+                                m_logConnDevTarget = envs.contains("DEV") ? envs.at("DEV").name_ : "";
+                                m_logConnTestTarget = envs.contains("TEST") ? envs.at("TEST").name_ : "";
+                                m_logConnProdTarget = envs.contains("PROD") ? envs.at("PROD").name_ : "";
+                                m_showLogConnModal = true;
+                            }
+
+                            if (ImGui::MenuItem("Renommer la connexion"))
+                            {
+                                m_renamingLogConnOldName = name;
+                                strncpy(m_renameLogConnBuf, name.c_str(), sizeof(m_renameLogConnBuf) - 1);
+                                m_showRenameLogConnModal = true;
+                            }
+
+                            ImGui::Separator();
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+                            if (ImGui::MenuItem("Supprimer la connexion"))
+                            {
+                                logToDelete = name;
+                            }
+                            ImGui::PopStyleColor();
+                            ImGui::EndPopup();
+                        }
+
+                        if (gwNodeOpen)
                         {
                             for (const auto &[envName, physConn] : logConn.environments())
                             {
@@ -1488,9 +1668,22 @@ void Application::renderProjectExplorerTree()
                             }
                             ImGui::TreePop();
                         }
+                        ImGui::PopID();
+                    }
+
+                    if (!logToDelete.empty())
+                    {
+                        m_activeProject->logicalConnections().erase(logToDelete);
+                        if (m_selectedGateway == logToDelete)
+                        {
+                            m_selectedGateway = "";
+                            m_selectedContext = "";
+                        }
                     }
                     ImGui::TreePop();
                 }
+                ImGui::PopID();
+
 
                 // 3. Datasets (Tables)
                 ImGui::PushID("DatasetsHeaderNode");
@@ -1820,6 +2013,7 @@ void Application::renderGlobalModals()
     renderSaveProjectAsModal();
     renderOpenProjectModal();
     renderRenameModals();
+    renderConnectionModals();
 }
 
 void Application::renderReverseEngineeringModal()
@@ -4413,3 +4607,338 @@ void Application::renderExpressionEditorModal()
     }
 }
 
+
+void Application::renderConnectionModals()
+{
+    if (!m_activeProject)
+        return;
+
+    // =========================================================================
+    // MODALE 1 : CRÉER / ÉDITER UNE CONNEXION PHYSIQUE (AVEC TEST DE CONNEXION)
+    // =========================================================================
+    if (m_showPhysConnModal)
+        ImGui::OpenPopup("Configuration Connexion Physique");
+
+    ImGui::SetNextWindowSize(ImVec2(480.0f, 380.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal("Configuration Connexion Physique", &m_showPhysConnModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_SERVER,
+                           m_isEditingPhysConn ? "Éditer la connexion PostgreSQL" : "Nouvelle connexion PostgreSQL");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Nom de la connexion :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##PhysName", "ex: pg_dev_local", m_physConnNameBuf, IM_ARRAYSIZE(m_physConnNameBuf));
+
+        ImGui::Spacing();
+
+        // Ligne Hôte + Port
+        ImGui::BeginGroup();
+        ImGui::Text("Hôte (Host) :");
+        ImGui::SetNextItemWidth(310.0f);
+        ImGui::InputText("##PhysHost", m_physConnHostBuf, IM_ARRAYSIZE(m_physConnHostBuf));
+        ImGui::EndGroup();
+
+        ImGui::SameLine();
+
+        ImGui::BeginGroup();
+        ImGui::Text("Port :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputInt("##PhysPort", &m_physConnPort, 0, 0);
+        ImGui::EndGroup();
+
+        ImGui::Spacing();
+
+        ImGui::Text("Base de données (dbname) :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##PhysDbName", "ex: t_financedb", m_physConnDbNameBuf, IM_ARRAYSIZE(m_physConnDbNameBuf));
+
+        ImGui::Spacing();
+
+        ImGui::Text("Utilisateur (user) :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##PhysUser", m_physConnUserBuf, IM_ARRAYSIZE(m_physConnUserBuf));
+
+        ImGui::Spacing();
+
+        ImGui::Text("Mot de passe (optionnel) :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##PhysPass", m_physConnPassBuf, IM_ARRAYSIZE(m_physConnPassBuf), ImGuiInputTextFlags_Password);
+
+        ImGui::Spacing();
+
+        // Bouton de test de connexion en direct
+        if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Tester la connexion").c_str()))
+        {
+            std::string connStr = "dbname=" + std::string(m_physConnDbNameBuf) +
+                                  " user=" + std::string(m_physConnUserBuf) +
+                                  " host=" + std::string(m_physConnHostBuf) +
+                                  " port=" + std::to_string(m_physConnPort) +
+                                  " sslmode=disable";
+            if (strlen(m_physConnPassBuf) > 0)
+                connStr += " password=" + std::string(m_physConnPassBuf);
+
+            cppsqlx::Connection testConn(connStr);
+            if (auto res = testConn.connect(); res.has_value())
+            {
+                m_physConnTestOk = true;
+                m_physConnTestStatus = "Connexion réussie !";
+                testConn.close();
+            }
+            else
+            {
+                m_physConnTestOk = false;
+                m_physConnTestStatus = "Échec : " + res.error();
+            }
+        }
+
+        if (!m_physConnTestStatus.empty())
+        {
+            ImGui::SameLine();
+            ImVec4 statusCol = m_physConnTestOk ? ImVec4(0.3f, 0.85f, 0.45f, 1.0f) : ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+            ImGui::TextColored(statusCol, "%s", m_physConnTestStatus.c_str());
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 230.0f);
+
+        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        {
+            m_showPhysConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+
+        bool canSavePhys = (strlen(m_physConnNameBuf) > 0) && (strlen(m_physConnDbNameBuf) > 0);
+        if (!canSavePhys)
+            ImGui::BeginDisabled();
+
+        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        {
+            std::string newName(m_physConnNameBuf);
+            cppsqlx::PhysicalConnection phys;
+            phys.name_ = newName;
+            phys.dbhost_ = std::string(m_physConnHostBuf);
+            phys.dbport_ = m_physConnPort;
+            phys.dbname_ = std::string(m_physConnDbNameBuf);
+            phys.dbuser_ = std::string(m_physConnUserBuf);
+            phys.dbpassword_ = std::string(m_physConnPassBuf);
+
+            if (m_isEditingPhysConn && !m_originalPhysConnName.empty() && m_originalPhysConnName != newName)
+            {
+                m_activeProject->physicalConnections().erase(m_originalPhysConnName);
+            }
+
+            m_activeProject->physicalConnections()[newName] = phys;
+            m_activeProject->resolveDependencies();
+
+            m_showPhysConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        if (!canSavePhys)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+
+    // =========================================================================
+    // MODALE 2 : RENOMMER UNE CONNEXION PHYSIQUE
+    // =========================================================================
+    if (m_showRenamePhysConnModal)
+        ImGui::OpenPopup("Renommer la connexion physique");
+
+    ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal("Renommer la connexion physique", &m_showRenamePhysConnModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::Text("Nouveau nom de la connexion physique :");
+        ImGui::SetNextItemWidth(-1.0f);
+        bool enterPressed = ImGui::InputText("##RenamePhysInput", m_renamePhysConnBuf, IM_ARRAYSIZE(m_renamePhysConnBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 210.0f);
+
+        if (ImGui::Button("Annuler##PhysRen", ImVec2(95.0f, 0.0f)))
+        {
+            m_showRenamePhysConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+
+        bool isValid = (strlen(m_renamePhysConnBuf) > 0);
+        if (!isValid)
+            ImGui::BeginDisabled();
+
+        if (ImGui::Button("Valider##PhysRen", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
+        {
+            std::string newName(m_renamePhysConnBuf);
+            if (!m_renamingPhysConnOldName.empty() && m_renamingPhysConnOldName != newName &&
+                m_activeProject->physicalConnections().contains(m_renamingPhysConnOldName))
+            {
+                cppsqlx::PhysicalConnection phys = m_activeProject->physicalConnections().at(m_renamingPhysConnOldName);
+                phys.name_ = newName;
+                m_activeProject->physicalConnections().erase(m_renamingPhysConnOldName);
+                m_activeProject->physicalConnections()[newName] = std::move(phys);
+                m_activeProject->resolveDependencies();
+            }
+            m_showRenamePhysConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        if (!isValid)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+
+    // =========================================================================
+    // MODALE 3 : CRÉER / ÉDITER UNE CONNEXION LOGIQUE (GATEWAY DEV / TEST / PROD)
+    // =========================================================================
+    if (m_showLogConnModal)
+        ImGui::OpenPopup("Configuration Connexion Logique");
+
+    ImGui::SetNextWindowSize(ImVec2(480.0f, 310.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal("Configuration Connexion Logique", &m_showLogConnModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_DATABASE,
+                           m_isEditingLogConn ? "Éditer la passerelle logique" : "Nouvelle passerelle logique");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("Nom de la passerelle (Gateway) :");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##LogName", "ex: DWH_FINANCE", m_logConnNameBuf, IM_ARRAYSIZE(m_logConnNameBuf));
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Sélecteur réutilisable pour chaque environnement (DEV, TEST, PROD)
+        auto drawEnvSelector = [&](const char *envLabel, std::string &targetPhysName)
+        {
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%-6s ->", envLabel);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-1.0f);
+
+            const char *preview = targetPhysName.empty() ? "(Aucune)" : targetPhysName.c_str();
+            if (ImGui::BeginCombo((std::string("##EnvCombo_") + envLabel).c_str(), preview))
+            {
+                if (ImGui::Selectable("(Aucune)", targetPhysName.empty()))
+                    targetPhysName = "";
+
+                for (const auto &[pName, pObj] : m_activeProject->physicalConnections())
+                {
+                    if (ImGui::Selectable(pName.c_str(), targetPhysName == pName))
+                        targetPhysName = pName;
+                }
+                ImGui::EndCombo();
+            }
+        };
+
+        drawEnvSelector("DEV", m_logConnDevTarget);
+        ImGui::Spacing();
+        drawEnvSelector("TEST", m_logConnTestTarget);
+        ImGui::Spacing();
+        drawEnvSelector("PROD", m_logConnProdTarget);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 230.0f);
+
+        if (ImGui::Button("Annuler##LogCfg", ImVec2(100.0f, 0.0f)))
+{
+m_showLogConnModal = false;
+ImGui::CloseCurrentPopup();
+}
+ImGui::SameLine();
+bool canSaveLog = (strlen(m_logConnNameBuf) > 0);
+if (!canSaveLog)
+ImGui::BeginDisabled();
+if (ImGui::Button("Enregistrer##LogCfg", ImVec2(120.0f, 0.0f)))
+{
+std::string gwName(m_logConnNameBuf);
+cppsqlx::LogicalConnection gw(gwName);
+            auto assignEnvIfValid = [&](const std::string &envName, const std::string &physName)
+            {
+                if (!physName.empty() && m_activeProject->physicalConnections().contains(physName))
+                {
+                    gw.registerEnvironment(envName, m_activeProject->physicalConnections().at(physName));
+                }
+            };
+
+assignEnvIfValid("DEV", m_logConnDevTarget);
+assignEnvIfValid("TEST", m_logConnTestTarget);
+assignEnvIfValid("PROD", m_logConnProdTarget);
+if (m_isEditingLogConn && !m_originalLogConnName.empty() && m_originalLogConnName != gwName)
+{
+m_activeProject->logicalConnections().erase(m_originalLogConnName);
+}
+m_activeProject->logicalConnections()[gwName] = std::move(gw);
+m_activeProject->resolveDependencies();
+m_showLogConnModal = false;
+ImGui::CloseCurrentPopup();
+}
+if (!canSaveLog)
+ImGui::EndDisabled();
+ImGui::EndPopup();
+}
+// =========================================================================
+// MODALE 4 : RENOMMER UNE CONNEXION LOGIQUE
+// =========================================================================
+if (m_showRenameLogConnModal)
+ImGui::OpenPopup("Renommer la connexion logique");
+ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
+if (ImGui::BeginPopupModal("Renommer la connexion logique", &m_showRenameLogConnModal, ImGuiWindowFlags_NoResize))
+{
+ImGui::Text("Nouveau nom de la passerelle logique :");
+ImGui::SetNextItemWidth(-1.0f);
+bool enterPressed = ImGui::InputText("##RenameLogInput", m_renameLogConnBuf, IM_ARRAYSIZE(m_renameLogConnBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+ImGui::Spacing();
+ImGui::Separator();
+ImGui::Spacing();
+float avail_x = ImGui::GetContentRegionAvail().x;
+ImGui::SetCursorPosX(avail_x - 210.0f);
+if (ImGui::Button("Annuler##LogRen", ImVec2(95.0f, 0.0f)))
+{
+m_showRenameLogConnModal = false;
+ImGui::CloseCurrentPopup();
+}
+ImGui::SameLine();
+bool isValid = (strlen(m_renameLogConnBuf) > 0);
+if (!isValid)
+ImGui::BeginDisabled();
+if (ImGui::Button("Valider##LogRen", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
+{
+std::string newName(m_renameLogConnBuf);
+if (!m_renamingLogConnOldName.empty() && m_renamingLogConnOldName != newName &&
+m_activeProject->logicalConnections().contains(m_renamingLogConnOldName))
+{
+cppsqlx::LogicalConnection gw = m_activeProject->logicalConnections().at(m_renamingLogConnOldName);
+gw.setName(newName);
+m_activeProject->logicalConnections().erase(m_renamingLogConnOldName);
+m_activeProject->logicalConnections()[newName] = std::move(gw);
+m_activeProject->resolveDependencies();
+if (m_selectedGateway == m_renamingLogConnOldName)
+m_selectedGateway = newName;
+}
+m_showRenameLogConnModal = false;
+ImGui::CloseCurrentPopup();
+}
+if (!isValid)
+ImGui::EndDisabled();
+ImGui::EndPopup();
+}
+}
