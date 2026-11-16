@@ -1569,6 +1569,17 @@ void Application::renderProjectExplorerTree()
                                 strncpy(m_physConnPassBuf, physConn.dbpassword_.c_str(), sizeof(m_physConnPassBuf) - 1);
                                 m_physConnTestStatus = "";
                                 m_showPhysConnModal = true;
+
+                                const char *sslModes[] = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"};
+                                m_physConnSslModeIndex = 2; // "prefer" par défaut
+                                for (int i = 0; i < 6; ++i)
+                                {
+                                    if (physConn.sslmode_ == sslModes[i])
+                                    {
+                                        m_physConnSslModeIndex = i;
+                                        break;
+                                    }
+                                }
                             }
 
                             if (ImGui::MenuItem("Renommer la connexion"))
@@ -4662,6 +4673,22 @@ void Application::renderConnectionModals()
 
         ImGui::Spacing();
 
+                // Sélecteur Mode SSL
+        const char *sslModes[] = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"};
+        ImGui::Text("Sécurité SSL (sslmode) :");
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("##PhysSslMode", sslModes[m_physConnSslModeIndex]))
+        {
+            for (int i = 0; i < 6; ++i)
+            {
+                if (ImGui::Selectable(sslModes[i], m_physConnSslModeIndex == i))
+                    m_physConnSslModeIndex = i;
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::Spacing();
+
         ImGui::Text("Mot de passe (optionnel) :");
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##PhysPass", m_physConnPassBuf, IM_ARRAYSIZE(m_physConnPassBuf), ImGuiInputTextFlags_Password);
@@ -4671,11 +4698,12 @@ void Application::renderConnectionModals()
         // Bouton de test de connexion en direct
         if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Tester la connexion").c_str()))
         {
+            // Dans "Tester la connexion" :
             std::string connStr = "dbname=" + std::string(m_physConnDbNameBuf) +
                                   " user=" + std::string(m_physConnUserBuf) +
                                   " host=" + std::string(m_physConnHostBuf) +
                                   " port=" + std::to_string(m_physConnPort) +
-                                  " sslmode=disable";
+                                  " sslmode=" + std::string(sslModes[m_physConnSslModeIndex]);
             if (strlen(m_physConnPassBuf) > 0)
                 connStr += " password=" + std::string(m_physConnPassBuf);
 
@@ -4729,6 +4757,7 @@ void Application::renderConnectionModals()
             phys.dbname_ = std::string(m_physConnDbNameBuf);
             phys.dbuser_ = std::string(m_physConnUserBuf);
             phys.dbpassword_ = std::string(m_physConnPassBuf);
+            phys.sslmode_ = std::string(sslModes[m_physConnSslModeIndex]);
 
             if (m_isEditingPhysConn && !m_originalPhysConnName.empty() && m_originalPhysConnName != newName)
             {

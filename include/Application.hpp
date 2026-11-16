@@ -374,6 +374,9 @@ private:
     std::string m_renamingLogConnOldName = "";
     char m_renameLogConnBuf[128] = "";
 
+    int m_physConnSslModeIndex = 2; // 0: disable, 1: allow, 2: prefer (défaut), 3: require, 4: verify-ca, 5: verify-full
+
+
     
     AppTheme m_currentTheme = AppTheme::DarkModern;
 

@@ -80,7 +80,7 @@ target_include_directories(imgui_node_editor_src SYSTEM PUBLIC
     ${imgui_node_editor_SOURCE_DIR}
 )
 target_link_libraries(imgui_node_editor_src PUBLIC imgui_src)
-target_compile_options(imgui_node_editor_src PRIVATE -w)
+target_compile_options(imgui_node_editor_src PRIVATE -w -include exception)
 
 # --- Main Project Executable ---
 file(GLOB_RECURSE PROJECT_HEADERS "include/*.hpp")
