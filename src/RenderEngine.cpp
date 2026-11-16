@@ -25,11 +25,11 @@ RenderEngine::RenderEngine(GLFWwindow *window)
 #ifdef __APPLE__
     std::string home_font = "";
     if (const char *home = std::getenv("HOME"))
-        home_font = std::string(home) + "/Library/Fonts/JetBrainsMono-Regular.ttf";
+        home_font = std::string(home) + "/Users/70075J/Library/Fonts/JetBrainsMono-Regular.ttf";
 
     for (const auto &candidate : {
              home_font,
-             std::string("/Library/Fonts/JetBrainsMono-Regular.ttf"),
+             std::string("/Users/70075J/Library/Fonts/JetBrainsMono-Regular.ttf"),
              std::string("/System/Library/Fonts/Supplemental/Menlo.ttc"),
              std::string("/System/Library/Fonts/Supplemental/Arial.ttf"),
              std::string("/System/Library/Fonts/Helvetica.ttc")})

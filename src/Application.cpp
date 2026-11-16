@@ -31,9 +31,9 @@ Application::Application()
     m_queryContext = ed::CreateEditor(&canvasConfig);
 
     #ifdef __APPLE__
-    auto res = cppsqlx::DataIntegrationProject::loadFromDisk("/home/santili/cppsqlx/projects/finance/project.json");
-    #else
     auto res = cppsqlx::DataIntegrationProject::loadFromDisk("/Users/70075J/cppsqlx/projects/finance/project.json");
+    #else
+    auto res = cppsqlx::DataIntegrationProject::loadFromDisk("/home/santili/cppsqlx/projects/finance/project.json");
     #endif
 
     if (res)
