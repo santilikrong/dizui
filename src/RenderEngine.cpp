@@ -74,20 +74,20 @@ RenderEngine::RenderEngine(GLFWwindow *window)
     ImFont *main_font = nullptr;
     if (!resolved_font_path.empty())
     {
-        main_font = io.Fonts->AddFontFromFileTTF(resolved_font_path.c_str(), 18.0f);
+        main_font = io.Fonts->AddFontFromFileTTF(resolved_font_path.c_str(), 16.0f);
     }
 
     if (main_font == nullptr)
     {
         // Taille explicite obligatoire pour autoriser MergeMode avec ImGui docking récent
         ImFontConfig default_cfg;
-        default_cfg.SizePixels = 18.0f;
+        default_cfg.SizePixels = 16.0f;
         main_font = io.Fonts->AddFontDefault(&default_cfg);
     }
 
     if (has_lucide && main_font != nullptr)
     {
-        io.Fonts->AddFontFromFileTTF(absolute_icon_path.string().c_str(), 20.0f, &icons_config, icons_ranges);
+        io.Fonts->AddFontFromFileTTF(absolute_icon_path.string().c_str(), 18.0f, &icons_config, icons_ranges);
     }
 
     // -------------------------------------------------------------------------
@@ -96,19 +96,19 @@ RenderEngine::RenderEngine(GLFWwindow *window)
     ImFont *small_font = nullptr;
     if (!resolved_font_path.empty())
     {
-        small_font = io.Fonts->AddFontFromFileTTF(resolved_font_path.c_str(), 15.0f);
+        small_font = io.Fonts->AddFontFromFileTTF(resolved_font_path.c_str(), 13.0f);
     }
 
     if (small_font == nullptr)
     {
         ImFontConfig small_default_cfg;
-        small_default_cfg.SizePixels = 15.0f;
+        small_default_cfg.SizePixels = 13.0f;
         small_font = io.Fonts->AddFontDefault(&small_default_cfg);
     }
 
     if (has_lucide && small_font != nullptr)
     {
-        io.Fonts->AddFontFromFileTTF(absolute_icon_path.string().c_str(), 14.0f, &icons_config, icons_ranges);
+        io.Fonts->AddFontFromFileTTF(absolute_icon_path.string().c_str(), 12.0f, &icons_config, icons_ranges);
     }
 
     if (has_lucide)

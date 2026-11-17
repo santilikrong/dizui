@@ -2048,6 +2048,12 @@ void Application::renderReverseEngineeringModal()
             last_env = m_selectedContext;
             modalConn.reset();
 
+            // Réinitialisation complète du cache de métadonnées
+            m_cachedSchemas.clear();
+            m_cachedTables.clear();
+            m_cachedStructure.clear();
+            m_reverseSelectedObject = "";
+
             if (m_activeProject && m_activeProject->logicalConnections().contains(m_selectedGateway))
             {
                 const auto &gateway = m_activeProject->logicalConnections().at(m_selectedGateway);
@@ -2091,11 +2097,13 @@ void Application::renderReverseEngineeringModal()
                 {
                     m_reverseSelectedSchema = sch;
                     m_reverseSelectedObject = "";
+                    m_cachedTables.clear();    // Force le rechargement des tables du nouveau schéma
                     m_cachedStructure.clear();
                 }
             }
             ImGui::EndCombo();
         }
+
 
         if (m_cachedTables.empty())
         {
@@ -2152,7 +2160,7 @@ void Application::renderReverseEngineeringModal()
         ImGui::Separator();
         if (ImGui::Button("Monter dans le Projet") && m_activeProject)
         {
-            auto datasetRes = cppsqlx::DatasetFactory().createFromDatabase(*modalConn, m_reverseSelectedObject);
+            auto datasetRes = cppsqlx::DatasetFactory().createFromDatabase(*modalConn, m_reverseSelectedObject, m_reverseSelectedSchema);
             if (datasetRes)
                 m_activeProject->addDataset(std::move(datasetRes.value()));
             m_showReverseModal = false;
@@ -4633,7 +4641,7 @@ void Application::renderConnectionModals()
     if (m_showPhysConnModal)
         ImGui::OpenPopup("Configuration Connexion Physique");
 
-    ImGui::SetNextWindowSize(ImVec2(480.0f, 380.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(580.0f, 480.0f), ImGuiCond_Once);
     if (ImGui::BeginPopupModal("Configuration Connexion Physique", &m_showPhysConnModal, ImGuiWindowFlags_NoResize))
     {
         ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_SERVER,
