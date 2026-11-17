@@ -138,20 +138,63 @@ void Application::createNewProject(const std::string &projectName)
     }
 }
 
-
 cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
 {
-    if (m_visualQueryNodes.empty() || !m_activeProject)
+    cppsqlx::SelectQuery query;
+    std::vector<std::string> local_select_headers;
+
+    if (!m_activeProject || m_visualQueryNodes.empty())
     {
-        return cppsqlx::SelectQuery{};
+        m_queryResultHeaders.clear();
+        return query;
     }
 
     ed::SetCurrentEditor(m_queryContext);
 
-    cppsqlx::SelectQuery query;
-    std::vector<std::string> local_select_headers;
+    // =========================================================================
+    // Étape 0 : Collecte et déclaration des CTE (WITH nom_requete AS (...))
+    // =========================================================================
+    std::set<std::string> registeredCteNames;
+    for (const auto &node : m_visualQueryNodes)
+    {
+        if (!node.isCTE || registeredCteNames.contains(node.datasetName))
+            continue;
 
+        for (const auto &sq : m_savedQueries)
+        {
+            if (sq.name == node.datasetName && !sq.compiledSelectJson.is_null() && !sq.compiledSelectJson.empty())
+            {
+                auto subRes = cppsqlx::SelectQuery::fromJSON(sq.compiledSelectJson);
+                if (subRes.has_value())
+                {
+                    auto subPtr = std::make_shared<cppsqlx::SelectQuery>(std::move(subRes.value()));
+                    query.with(node.datasetName, subPtr);
+                    registeredCteNames.insert(node.datasetName);
+                }
+                break;
+            }
+        }
+    }
+
+    // Helper interne pour résoudre un nœud (Table physique OU CTE) en objet Joinable (Dataset)
+    auto resolveNodeAsJoinable = [&](const VisualQueryNode &node) -> std::shared_ptr<cppsqlx::Dataset>
+    {
+        if (node.isCTE)
+        {
+            // Une CTE est interrogée par son nom dans la clause FROM / JOIN (sans préfixe de schéma)
+            cppsqlx::Dataset cteDs(node.datasetName);
+            return std::make_shared<cppsqlx::Dataset>(std::move(cteDs));
+        }
+        if (m_activeProject->datasets().contains(node.datasetName))
+        {
+            return std::make_shared<cppsqlx::Dataset>(m_activeProject->datasets().at(node.datasetName));
+        }
+        return nullptr;
+    };
+
+    // =========================================================================
     // Étape A : Clause SELECT unifiée (SQLSelectionSet)
+    // =========================================================================
     cppsqlx::SQLSelectionSet selectionSet;
     bool has_selection = false;
     bool has_aggregate = false;
@@ -163,13 +206,33 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
             if (item.sqlExpression.empty())
                 continue;
 
-            cppsqlx::SQLExpression expr = operator""_col(item.sqlExpression.c_str(), item.sqlExpression.length());
+            std::string finalSqlExpr = item.sqlExpression;
+
+            // Résolution dynamique de l'alias actuel du nœud si la colonne n'est pas une formule libre
+            if (!item.isCustomExpression && item.sourceNodeId != 0)
+            {
+                for (const auto &node : m_visualQueryNodes)
+                {
+                    if (node.id == item.sourceNodeId)
+                    {
+                        std::string rawCol = finalSqlExpr;
+                        if (auto dot = rawCol.find('.'); dot != std::string::npos)
+                        {
+                            rawCol = rawCol.substr(dot + 1);
+                        }
+                        finalSqlExpr = node.alias.empty() ? rawCol : (node.alias + "." + rawCol);
+                        break;
+                    }
+                }
+            }
+
+            cppsqlx::SQLExpression expr = operator""_col(finalSqlExpr.c_str(), finalSqlExpr.length());
             if (!item.alias.empty())
             {
                 expr = expr.as(item.alias);
             }
             selectionSet.add(expr);
-            local_select_headers.push_back(item.alias.empty() ? item.sqlExpression : item.alias);
+            local_select_headers.push_back(item.alias.empty() ? finalSqlExpr : item.alias);
             has_selection = true;
 
             if (item.isAggregate)
@@ -182,20 +245,21 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
         // Rétrocompatibilité avec les anciennes requêtes sans m_projectionItems
         for (const auto &node : m_visualQueryNodes)
         {
-            if (!m_activeProject->datasets().contains(node.datasetName))
-                continue;
-            const auto &dataset = m_activeProject->datasets().at(node.datasetName);
-            for (size_t col_idx : node.selectedColumns)
+            if (!node.isCTE && m_activeProject->datasets().contains(node.datasetName))
             {
-                if (dataset.columns().contains(col_idx))
+                const auto &dataset = m_activeProject->datasets().at(node.datasetName);
+                for (size_t col_idx : node.selectedColumns)
                 {
-                    std::string field_name = dataset.columns().at(col_idx).name();
-                    std::string qualified_col = node.alias.empty() ? field_name : (node.alias + "." + field_name);
-                    std::string unique_alias = node.alias.empty() ? field_name : (node.alias + "_" + field_name);
+                    if (dataset.columns().contains(col_idx))
+                    {
+                        std::string field_name = dataset.columns().at(col_idx).name();
+                        std::string qualified_col = node.alias.empty() ? field_name : (node.alias + "." + field_name);
+                        std::string unique_alias = node.alias.empty() ? field_name : (node.alias + "_" + field_name);
 
-                    query.select(operator""_col(qualified_col.c_str(), qualified_col.length()).as(unique_alias));
-                    local_select_headers.push_back(unique_alias);
-                    has_selection = true;
+                        query.select(operator""_col(qualified_col.c_str(), qualified_col.length()).as(unique_alias));
+                        local_select_headers.push_back(unique_alias);
+                        has_selection = true;
+                    }
                 }
             }
         }
@@ -209,135 +273,90 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
 
     m_queryResultHeaders = local_select_headers;
 
-
-    // Étape B : Clause FROM
-    const auto &root_node = m_visualQueryNodes.front();
-    if (!m_activeProject->datasets().contains(root_node.datasetName))
+    // =========================================================================
+    // Étape B : Table / CTE principale (Clause FROM)
+    // =========================================================================
+    const auto &firstNode = m_visualQueryNodes[0];
+    if (auto firstDsPtr = resolveNodeAsJoinable(firstNode))
     {
-        ed::SetCurrentEditor(nullptr);
-        cppsqlx::SelectQuery{};
+        std::string firstAlias = firstNode.alias.empty() ? firstNode.datasetName : firstNode.alias;
+        query.from(firstDsPtr, firstAlias);
     }
 
-    cppsqlx::Dataset root_dataset = m_activeProject->datasets().at(root_node.datasetName);
-    root_dataset.as(root_node.alias);
-    query.from(root_dataset);
-
     // =========================================================================
-    // Étape C : Clauses JOIN (SQLJoinExpression) — RÉSOLUTION D'ORDRE TOPOLOGIQUE
+    // Étape C : Construction des jointures (INNER, LEFT, RIGHT, FULL)
     // =========================================================================
-    // Registre pour suivre les alias de tables déjà introduits dans le FROM/JOIN
-    std::set<std::string> introduced_aliases;
-    introduced_aliases.insert(root_node.alias);
+    std::set<uintptr_t> joinedNodeIds;
+    joinedNodeIds.insert(firstNode.id);
 
-    // Copie de travail des liens de jointures pour pouvoir les consommer par vagues
-    std::vector<VisualQueryLink> remaining_links;
     for (const auto &link : m_visualQueryLinks)
     {
-        if (link.startPinId >= 500000 || link.endPinId >= 500000)
-            continue; // Écarte les filtres WHERE
-        remaining_links.push_back(link);
-    }
+        uintptr_t src_node_id = link.startPinId / 1000;
+        uintptr_t dst_node_id = link.endPinId / 1000;
 
-    size_t last_size = remaining_links.size() + 1;
+        const VisualQueryNode *srcNode = nullptr;
+        const VisualQueryNode *dstNode = nullptr;
 
-    // On boucle tant qu'il reste des liens à ordonner et qu'on progresse
-    while (!remaining_links.empty() && remaining_links.size() < last_size)
-    {
-        last_size = remaining_links.size();
-
-        for (auto it = remaining_links.begin(); it != remaining_links.end();)
+        for (const auto &n : m_visualQueryNodes)
         {
-            uintptr_t src_node_id = it->startPinId / 1000;
-            uintptr_t dst_node_id = it->endPinId / 1000;
-
-            std::string src_alias = "";
-            std::string dst_alias = "";
-            std::string target_dataset_name = "";
-
-            for (const auto &n : m_visualQueryNodes)
-            {
-                if (n.id == src_node_id)
-                    src_alias = n.alias;
-                if (n.id == dst_node_id)
-                {
-                    dst_alias = n.alias;
-                    target_dataset_name = n.datasetName;
-                }
-            }
-
-            // On ne traite ce JOIN que si la table source (src_alias)
-            // a déjà été déclarée au-dessus dans la requête !
-            if (introduced_aliases.contains(src_alias))
-            {
-                if (!target_dataset_name.empty() && m_activeProject->datasets().contains(target_dataset_name))
-                {
-                    std::string left_raw_col = it->leftFieldName;
-                    if (auto dot = left_raw_col.find('.'); dot != std::string::npos)
-                        left_raw_col = left_raw_col.substr(dot + 1);
-
-                    std::string right_raw_col = it->rightFieldName;
-                    if (auto dot = right_raw_col.find('.'); dot != std::string::npos)
-                        right_raw_col = right_raw_col.substr(dot + 1);
-
-                    std::string final_left_field = src_alias + "." + left_raw_col;
-                    std::string final_right_field = dst_alias + "." + right_raw_col;
-
-                    cppsqlx::Dataset join_dataset = m_activeProject->datasets().at(target_dataset_name);
-
-                    std::string join_type_str = "INNER JOIN";
-                    if (it->type == cppsqlx::JoinType::LEFT)
-                        join_type_str = "LEFT JOIN";
-                    if (it->type == cppsqlx::JoinType::RIGHT)
-                        join_type_str = "RIGHT JOIN";
-                    if (it->type == cppsqlx::JoinType::FULL)
-                        join_type_str = "FULL JOIN";
-
-                    cppsqlx::SQLExpression left_expr = operator""_col(final_left_field.c_str(), final_left_field.length());
-                    cppsqlx::SQLExpression right_expr = operator""_col(final_right_field.c_str(), final_right_field.length());
-
-                    // Utilisation de l'itérateur it->op au lieu de link.op
-                    cppsqlx::SQLJoinExpression joinExpr;
-                    if (it->op == cppsqlx::SQLOperator::Equal)
-                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).equalOp();
-                    else if (it->op == cppsqlx::SQLOperator::NotEqual)
-                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).notEqualOp();
-                    else if (it->op == cppsqlx::SQLOperator::Greater)
-                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).greaterOp();
-                    else if (it->op == cppsqlx::SQLOperator::Less)
-                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).lessOp();
-                    else if (it->op == cppsqlx::SQLOperator::GreaterOrEqual)
-                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).greaterOrEqualOp();
-                    else if (it->op == cppsqlx::SQLOperator::LessOrEqual)
-                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).lessOrEqualOp();
-                    else
-                        joinExpr = cppsqlx::JEX().left(left_expr).right(right_expr).equalOp();
-
-                    // Injection propre ordonnée dans cppsqlx::SelectQuery
-                    query.join(join_type_str, std::make_shared<cppsqlx::Dataset>(join_dataset), dst_alias, joinExpr);
-
-                    // On enregistre que cette nouvelle table fait désormais partie du scope valide
-                    introduced_aliases.insert(dst_alias);
-                }
-
-                // Supprime le lien de la liste d'attente car il a été traité
-                it = remaining_links.erase(it);
-            }
-            else
-            {
-                // La table source n'est pas encore introduite, on reporte ce lien à la prochaine vague
-                ++it;
-            }
+            if (n.id == src_node_id)
+                srcNode = &n;
+            if (n.id == dst_node_id)
+                dstNode = &n;
         }
+
+        if (!srcNode || !dstNode)
+            continue;
+
+        const VisualQueryNode *targetNode = joinedNodeIds.contains(dst_node_id) ? srcNode : dstNode;
+        if (joinedNodeIds.contains(targetNode->id))
+            continue;
+
+        auto targetDsPtr = resolveNodeAsJoinable(*targetNode);
+        if (!targetDsPtr)
+            continue;
+
+        std::string live_left_field = link.leftFieldName;
+        if (auto dot = live_left_field.find('.'); dot != std::string::npos)
+            live_left_field = srcNode->alias + "." + live_left_field.substr(dot + 1);
+
+        std::string live_right_field = link.rightFieldName;
+        if (auto dot = live_right_field.find('.'); dot != std::string::npos)
+            live_right_field = dstNode->alias + "." + live_right_field.substr(dot + 1);
+
+        cppsqlx::SQLExpression left_expr = operator""_col(live_left_field.c_str(), live_left_field.length());
+        cppsqlx::SQLExpression right_expr = operator""_col(live_right_field.c_str(), live_right_field.length());
+
+        cppsqlx::SQLExpression on_expr;
+        if (link.op == cppsqlx::SQLOperator::Equal)
+            on_expr = left_expr.equal(right_expr);
+        else if (link.op == cppsqlx::SQLOperator::NotEqual)
+            on_expr = left_expr.notEqual(right_expr);
+        else if (link.op == cppsqlx::SQLOperator::Greater)
+            on_expr = left_expr.greater(right_expr);
+        else if (link.op == cppsqlx::SQLOperator::Less)
+            on_expr = left_expr.less(right_expr);
+        else if (link.op == cppsqlx::SQLOperator::GreaterOrEqual)
+            on_expr = left_expr.greaterOrEqual(right_expr);
+        else if (link.op == cppsqlx::SQLOperator::LessOrEqual)
+            on_expr = left_expr.lessOrEqual(right_expr);
+        else
+            on_expr = left_expr.equal(right_expr);
+
+        std::string joinTypeStr = "INNER JOIN";
+        if (link.type == cppsqlx::JoinType::LEFT)
+            joinTypeStr = "LEFT JOIN";
+        else if (link.type == cppsqlx::JoinType::RIGHT)
+            joinTypeStr = "RIGHT JOIN";
+        else if (link.type == cppsqlx::JoinType::FULL)
+            joinTypeStr = "FULL JOIN";
+
+        std::string targetAlias = targetNode->alias.empty() ? targetNode->datasetName : targetNode->alias;
+        query.join(joinTypeStr, targetDsPtr, targetAlias, on_expr);
+        joinedNodeIds.insert(targetNode->id);
     }
 
-    // Sécurité anti-graphe orphelin déconnecté
-    if (!remaining_links.empty())
-    {
-        std::cout << "[dizui Compiler] Warning : Certaines jointures sont orphelines et n'ont pu être ordonnées." << std::endl;
-    }
-
-    // Étape D : Clause WHERE (Prédicats simples ET Expressions SQL avancées)
-     // =========================================================================
+    // =========================================================================
     // Étape D : Clause WHERE (Prédicats simples ET Expressions SQL avancées)
     // =========================================================================
     std::string combinedWhereSql = "";
@@ -348,7 +367,7 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
 
         if (pred.isCustomExpression && !pred.customSqlCondition.empty())
         {
-            singlePredSql = "(" + pred.customSqlCondition + ")";
+            singlePredSql = pred.customSqlCondition;
         }
         else if (!pred.isCustomExpression && pred.connectedSrcPinId != 0 && !pred.value.empty())
         {
@@ -383,7 +402,6 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
             {
                 val_expr = cppsqlx::SQLExpression(pred.value);
             }
-
             cppsqlx::SQLExpression final_where_expr;
             if (pred.op == cppsqlx::SQLOperator::Equal)
                 final_where_expr = col_expr.equal(val_expr);
@@ -399,27 +417,23 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
                 final_where_expr = col_expr.lessOrEqual(val_expr);
             else
                 final_where_expr = col_expr.equal(val_expr);
-
             singlePredSql = final_where_expr.toSQL();
         }
-
         if (!singlePredSql.empty())
         {
             if (combinedWhereSql.empty())
                 combinedWhereSql = singlePredSql;
             else
-                combinedWhereSql += " AND " + singlePredSql;
+                combinedWhereSql = "(" + combinedWhereSql + ") AND (" + singlePredSql + ")";
         }
     }
-
     if (!combinedWhereSql.empty())
     {
         query.where(cppsqlx::SQLExpression(combinedWhereSql));
     }
-
-
-
-    // Étape E : GROUP BY automatique si une expression d'agrégation (SUM, COUNT, AVG...) est présente
+    // =========================================================================
+    // Étape E : GROUP BY automatique si fonction d'agrégation présente
+    // =========================================================================
     if (has_aggregate)
     {
         for (const auto &item : m_projectionItems)
@@ -430,8 +444,6 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
             }
         }
     }
-
-
     ed::SetCurrentEditor(nullptr);
     return query;
 }
@@ -542,12 +554,27 @@ nlohmann::json Application::serializeFullProjectToJSON()
     uiState["queries"] = nlohmann::json::array();
     for (const auto &q : m_savedQueries)
     {
-        uiState["queries"].push_back({{"name", q.name},
-                                      {"description", q.description},
-                                      {"sql", q.sql},
-                                      {"visual_state", q.visualState},
-                                      {"select_json", q.compiledSelectJson}});
+        nlohmann::json schemaArr = nlohmann::json::array();
+        for (const auto &col : q.outputSchema)
+        {
+            schemaArr.push_back({
+                {"name", col.name},
+                {"dataType", col.dataType},
+                {"isNullable", col.isNullable},
+                {"isPrimaryKey", col.isPrimaryKey}
+            });
+        }
+
+        uiState["queries"].push_back({
+            {"name", q.name},
+            {"description", q.description},
+            {"sql", q.sql},
+            {"visual_state", q.visualState},
+            {"select_json", q.compiledSelectJson},
+            {"output_schema", std::move(schemaArr)}
+        });
     }
+
 
     uiState["workflows"] = nlohmann::json::array();
     for (const auto &wf : m_savedWorkflows)
@@ -690,9 +717,24 @@ bool Application::loadProjectFromFile(const std::string &filePath)
                         sq.visualState = qJson["visual_state"];
                     if (qJson.contains("select_json"))
                         sq.compiledSelectJson = qJson["select_json"];
+
+                    if (qJson.contains("output_schema") && qJson["output_schema"].is_array())
+                    {
+                        for (const auto &colJson : qJson["output_schema"])
+                        {
+                            cppsqlx::ColumnMetadata cm;
+                            cm.name = colJson.value("name", "");
+                            cm.dataType = colJson.value("dataType", "any");
+                            cm.isNullable = colJson.value("isNullable", true);
+                            cm.isPrimaryKey = colJson.value("isPrimaryKey", false);
+                            sq.outputSchema.push_back(std::move(cm));
+                        }
+                    }
+
                     m_savedQueries.push_back(std::move(sq));
                 }
             }
+
 
             if (uiState.contains("workflows") && uiState["workflows"].is_array())
             {
@@ -801,6 +843,7 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
             node.alias = nJson.value("alias", "");
             node.position = ImVec2(nJson.value("x", 100.0f), nJson.value("y", 100.0f));
             node.needsPositionInitialization = true;
+            node.isCTE = nJson.value("isCTE", false);
 
             if (nJson.contains("selectedColumns") && nJson["selectedColumns"].is_array())
             {
@@ -813,7 +856,9 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
         }
     }
 
+
     // 3. Restauration des liens de jointures (VisualQueryLink)
+    // Restauration des liens et opérateurs de jointure
     if (vState.contains("links") && vState["links"].is_array())
     {
         ed::SetCurrentEditor(m_queryContext);
@@ -823,23 +868,23 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
             link.id = lJson.value("id", uintptr_t(0));
             link.startPinId = lJson.value("startPinId", uintptr_t(0));
             link.endPinId = lJson.value("endPinId", uintptr_t(0));
-            link.centralNodeId = lJson.value("centralNodeId", uintptr_t(0));
-            link.leftPinId = lJson.value("leftPinId", uintptr_t(0));
-            link.rightPinId = lJson.value("rightPinId", uintptr_t(0));
+            link.centralNodeId = lJson.value("centralNodeId", link.id + 5000);
+            link.leftPinId = lJson.value("leftPinId", link.id + 10000);
+            link.rightPinId = lJson.value("rightPinId", link.id + 15000);
             link.type = static_cast<cppsqlx::JoinType>(lJson.value("type", 0));
             link.leftFieldName = lJson.value("leftFieldName", "");
             link.rightFieldName = lJson.value("rightFieldName", "");
             link.op = static_cast<cppsqlx::SQLOperator>(lJson.value("op", 0));
 
-            if (lJson.contains("joinX") && lJson.contains("joinY"))
-            {
-                ed::SetNodePosition(link.centralNodeId, ImVec2(lJson["joinX"].get<float>(), lJson["joinY"].get<float>()));
-            }
+            float jx = lJson.value("joinX", 0.0f);
+            float jy = lJson.value("joinY", 0.0f);
+            ed::SetNodePosition(link.centralNodeId, ImVec2(jx, jy));
 
             m_visualQueryLinks.push_back(std::move(link));
         }
         ed::SetCurrentEditor(nullptr);
     }
+
 
     // 4. Restauration des filtres (VisualQueryPredicate)
     if (vState.contains("predicates") && vState["predicates"].is_array())
@@ -1800,6 +1845,13 @@ void Application::renderProjectExplorerTree()
                                 else
                                     ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options");
                             }
+                            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+                            {
+                                ImGui::SetDragDropPayload("DND_CTE_QUERY_NODE", saved.name.c_str(), saved.name.size() + 1);
+                                drawLargeIconText(ICON_LC_FILE_TEXT, ("CTE : " + saved.name).c_str(), 12.0f);
+                                ImGui::EndDragDropSource();
+                            }
+
                             ImGui::SameLine(0.0f, 0.0f);
                             drawLargeIconText(ICON_LC_FILE_TEXT, saved.name.c_str(), 12.0f);
                             ImGui::PopID();
@@ -2947,116 +2999,174 @@ void Application::renderQueryEditor()
 
         ImGui::SameLine();
 
+        bool canSaveQuery = (strlen(m_saveQueryNameBuf) > 0);
+        if (!canSaveQuery)
+            ImGui::BeginDisabled();
+
         if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
         {
-            if (strlen(m_saveQueryNameBuf) > 0)
+            m_executionError.clear();
+
+            std::string qName(m_saveQueryNameBuf);
+            std::string qDesc(m_saveQueryDescBuf);
+
+            cppsqlx::SelectQuery compiledSelect = compileVisualGraphToSelectQuery();
+            std::string compiledSql = compiledSelect.toSQL();
+            nlohmann::json compiledJson = compiledSelect.toJSON();
+
+            // 1. Déduction de la structure de sortie (Introspection PostgreSQL LIMIT 0 + repli local)
+            std::vector<cppsqlx::ColumnMetadata> deducedSchema;
+            bool introspectedFromDb = false;
+
+            if (m_activeProject && m_activeProject->logicalConnections().contains(m_selectedGateway))
             {
-                std::string targetName(m_saveQueryNameBuf);
-                std::string targetDesc(m_saveQueryDescBuf);
-
-                // COMPILATION UNIQUE DU SELECTQUERY (SQL + JSON OFFICIEL)
-                cppsqlx::SelectQuery compiledQuery = compileVisualGraphToSelectQuery();
-                std::string sql_snapshot = compiledQuery.toSQL();
-                nlohmann::json selectJson = compiledQuery.toJSON();
-
-                // 1. Capture complète de l'état visuel du graphe
-                nlohmann::json vState;
-                vState["nodes"] = nlohmann::json::array();
-
-                ed::SetCurrentEditor(m_queryContext);
-                for (const auto &node : m_visualQueryNodes)
+                const auto &gw = m_activeProject->logicalConnections().at(m_selectedGateway);
+                if (gw.environments().contains(m_selectedContext))
                 {
-                    ImVec2 pos = ed::GetNodePosition(node.id);
-                    vState["nodes"].push_back({{"id", node.id},
-                                               {"datasetName", node.datasetName},
-                                               {"alias", node.alias},
-                                               {"x", pos.x},
-                                               {"y", pos.y},
-                                               {"selectedColumns", node.selectedColumns}});
+                    const auto &phys = gw.environments().at(m_selectedContext);
+                    auto probeConn = std::make_shared<cppsqlx::Connection>(phys.toConnectionString());
+                    if (probeConn->connect().has_value())
+                    {
+                        cppsqlx::DatabaseMetadata meta(probeConn);
+                        auto structRes = meta.getQueryStructure(compiledSql);
+                        if (structRes.has_value())
+                        {
+                            deducedSchema = std::move(structRes.value());
+                            introspectedFromDb = true;
+                        }
+                        else
+                        {
+                            m_executionError = structRes.error();
+                        }
+                    }
                 }
+            }
 
-                vState["links"] = nlohmann::json::array();
-                for (const auto &link : m_visualQueryLinks)
-                {
-                    ImVec2 joinPos = ed::GetNodePosition(link.centralNodeId);
-                    vState["links"].push_back({{"id", link.id},
-                                               {"startPinId", link.startPinId},
-                                               {"endPinId", link.endPinId},
-                                               {"centralNodeId", link.centralNodeId},
-                                               {"joinX", joinPos.x},
-                                               {"joinY", joinPos.y},
-                                               {"leftPinId", link.leftPinId},
-                                               {"rightPinId", link.rightPinId},
-                                               {"type", static_cast<int>(link.type)},
-                                               {"leftFieldName", link.leftFieldName},
-                                               {"rightFieldName", link.rightFieldName},
-                                               {"op", static_cast<int>(link.op)}});
-                }
-
-                vState["predicates"] = nlohmann::json::array();
-                for (const auto &pred : m_visualQueryPredicates)
-                {
-                    ImVec2 pos = ed::GetNodePosition(pred.id);
-                    vState["predicates"].push_back({{"id", pred.id},
-                                                    {"x", pos.x},
-                                                    {"y", pos.y},
-                                                    {"inputPinId", pred.inputPinId},
-                                                    {"outputPinId", pred.outputPinId},
-                                                    {"targetColumn", pred.targetColumn},
-                                                    {"op", static_cast<int>(pred.op)},
-                                                    {"value", pred.value},
-                                                    {"connectedSrcPinId", pred.connectedSrcPinId},
-                                                    {"isCustomExpression", pred.isCustomExpression},
-                                                    {"customSqlCondition", pred.customSqlCondition}});
-                }
-
-                // 4. Capture de la projection unifiée (colonnes ordonnées + expressions calculées)
-                vState["projections"] = nlohmann::json::array();
+            if (!introspectedFromDb)
+            {
                 for (const auto &proj : m_projectionItems)
                 {
-                    vState["projections"].push_back({
-                        {"id", proj.id},
-                        {"alias", proj.alias},
-                        {"sqlExpression", proj.sqlExpression},
-                        {"isAggregate", proj.isAggregate},
-                        {"isCustomExpression", proj.isCustomExpression}
-                    });
+                    cppsqlx::ColumnMetadata cm;
+                    cm.name = proj.alias.empty() ? proj.sqlExpression : proj.alias;
+                    cm.dataType = proj.isCustomExpression ? "expr" : "any";
+                    cm.isNullable = true;
+                    cm.isPrimaryKey = false;
+                    deducedSchema.push_back(std::move(cm));
                 }
-
-                vState["hasProjectionNode"] = m_hasProjectionNode;
-                if (m_hasProjectionNode)
-                {
-                    ImVec2 projPos = ed::GetNodePosition(99000);
-                    vState["projectionX"] = projPos.x;
-                    vState["projectionY"] = projPos.y;
-                }
-
-                ed::SetCurrentEditor(nullptr);
-
-                // 2. Création de l'objet mis à jour avec son état visuel ET son SelectQuery JSON
-                SavedQuery updatedQuery{targetName, targetDesc, sql_snapshot, vState, selectJson};
-
-                // 3. Recherche par nom pour écraser l'ancienne version ou ajouter la nouvelle
-                auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
-                                       [&targetName](const SavedQuery &q)
-                                       { return q.name == targetName; });
-
-                if (it != m_savedQueries.end())
-                {
-                    *it = std::move(updatedQuery);
-                }
-                else
-                {
-                    m_savedQueries.push_back(std::move(updatedQuery));
-                }
-
-                m_showSaveQueryModal = false;
-                ImGui::CloseCurrentPopup();
             }
+
+            // 2. Capture complète du graphe visuel (Nœuds, Liens de jointure, Filtres WHERE, Projections)
+            nlohmann::json vState;
+            ed::SetCurrentEditor(m_queryContext);
+
+            // 2a. Nœuds (Tables et CTE)
+            vState["nodes"] = nlohmann::json::array();
+            for (const auto &n : m_visualQueryNodes)
+            {
+                ImVec2 pos = ed::GetNodePosition(n.id);
+                vState["nodes"].push_back({
+                    {"id", n.id},
+                    {"datasetName", n.datasetName},
+                    {"x", pos.x},
+                    {"y", pos.y},
+                    {"alias", n.alias},
+                    {"selectedColumns", n.selectedColumns},
+                    {"isCTE", n.isCTE}
+                });
+            }
+
+            // 2b. Liens et opérateurs de jointure (JOIN)
+            vState["links"] = nlohmann::json::array();
+            for (const auto &l : m_visualQueryLinks)
+            {
+                ImVec2 joinPos = ed::GetNodePosition(l.centralNodeId);
+                vState["links"].push_back({
+                    {"id", l.id},
+                    {"startPinId", l.startPinId},
+                    {"endPinId", l.endPinId},
+                    {"centralNodeId", l.centralNodeId},
+                    {"leftPinId", l.leftPinId},
+                    {"rightPinId", l.rightPinId},
+                    {"type", static_cast<int>(l.type)},
+                    {"leftFieldName", l.leftFieldName},
+                    {"rightFieldName", l.rightFieldName},
+                    {"op", static_cast<int>(l.op)},
+                    {"joinX", joinPos.x},
+                    {"joinY", joinPos.y}
+                });
+            }
+
+            // 2c. Filtres (WHERE)
+            vState["predicates"] = nlohmann::json::array();
+            for (const auto &p : m_visualQueryPredicates)
+            {
+                ImVec2 pPos = ed::GetNodePosition(p.id);
+                vState["predicates"].push_back({
+                    {"id", p.id},
+                    {"x", pPos.x},
+                    {"y", pPos.y},
+                    {"inputPinId", p.inputPinId},
+                    {"outputPinId", p.outputPinId},
+                    {"targetColumn", p.targetColumn},
+                    {"op", static_cast<int>(p.op)},
+                    {"value", p.value},
+                    {"connectedSrcPinId", p.connectedSrcPinId},
+                    {"isCustomExpression", p.isCustomExpression},
+                    {"customSqlCondition", p.customSqlCondition}
+                });
+            }
+
+            // 2d. Projection unifiée (SELECT / Expressions)
+            vState["projections"] = nlohmann::json::array();
+            for (const auto &proj : m_projectionItems)
+            {
+                vState["projections"].push_back({
+                    {"id", proj.id},
+                    {"alias", proj.alias},
+                    {"sqlExpression", proj.sqlExpression},
+                    {"isAggregate", proj.isAggregate},
+                    {"isCustomExpression", proj.isCustomExpression},
+                    {"sourceNodeId", proj.sourceNodeId}
+                });
+            }
+
+            vState["hasProjectionNode"] = m_hasProjectionNode;
+            if (m_hasProjectionNode)
+            {
+                ImVec2 projPos = ed::GetNodePosition(99000);
+                vState["projectionX"] = projPos.x;
+                vState["projectionY"] = projPos.y;
+            }
+
+            ed::SetCurrentEditor(nullptr);
+
+            // 3. Ajout ou mise à jour dans m_savedQueries
+            SavedQuery updatedQuery{
+                qName,
+                qDesc,
+                compiledSql,
+                std::move(vState),
+                std::move(compiledJson),
+                std::move(deducedSchema)
+            };
+
+            auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
+                                   [&qName](const SavedQuery &q) { return q.name == qName; });
+            if (it != m_savedQueries.end())
+                *it = std::move(updatedQuery);
+            else
+                m_savedQueries.push_back(std::move(updatedQuery));
+
+            m_showSaveQueryModal = false;
+            ImGui::CloseCurrentPopup();
         }
+
+        if (!canSaveQuery)
+            ImGui::EndDisabled();
 
         ImGui::EndPopup();
     }
+
 }
 
 void Application::renderQueryCanvas(float canvas_height)
@@ -3105,7 +3215,15 @@ void Application::handleCanvasInteraction()
             {
                 std::string dataset_name = (const char *)payload->Data;
                 uintptr_t new_id = m_visualQueryNodes.size() + 100;
-                VisualQueryNode newNode{new_id, dataset_name, canvas_space_pos, true, dataset_name, {}};
+                VisualQueryNode newNode{new_id, dataset_name, canvas_space_pos, true, dataset_name, {}, false};
+                m_visualQueryNodes.push_back(std::move(newNode));
+            }
+            else if (strcmp(payload->DataType, "DND_CTE_QUERY_NODE") == 0)
+            {
+                std::string cte_name = (const char *)payload->Data;
+                uintptr_t new_id = m_visualQueryNodes.size() + 100;
+                std::string default_alias = "cte_" + std::to_string(new_id);
+                VisualQueryNode newNode{new_id, cte_name, canvas_space_pos, true, default_alias, {}, true};
                 m_visualQueryNodes.push_back(std::move(newNode));
             }
             else if (strcmp(payload->DataType, "DND_PREDICATE_NODE") == 0)
@@ -3122,6 +3240,7 @@ void Application::handleCanvasInteraction()
     }
 }
 
+
 void Application::renderCanvasDatasetNodes()
 {
     for (auto &visualNode : m_visualQueryNodes)
@@ -3132,98 +3251,177 @@ void Application::renderCanvasDatasetNodes()
             ed::SetNodePosition(visualNode.id, visualNode.position);
         }
 
+        // Bordure légèrement dorée pour distinguer visuellement une CTE d'une table physique
+        if (visualNode.isCTE)
+        {
+            ed::PushStyleColor(ed::StyleColor_NodeBorder, ImVec4(0.95f, 0.70f, 0.25f, 0.90f));
+        }
+
         ed::BeginNode(visualNode.id);
         ImGui::BeginGroup();
 
-        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Table: %s", ICON_LC_DATABASE, visualNode.datasetName.c_str());
+        if (visualNode.isCTE)
+        {
+            ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.25f, 1.0f), "%s  CTE: %s", ICON_LC_FILE_TEXT, visualNode.datasetName.c_str());
+        }
+        else
+        {
+            ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Table: %s", ICON_LC_DATABASE, visualNode.datasetName.c_str());
+        }
+
         ImGui::TextDisabled("  Alias :");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(110.0f);
 
-        char alias_buf[256];
-        snprintf(alias_buf, sizeof(alias_buf), "%s", visualNode.alias.c_str());
-        if (ImGui::InputText(("##alias_" + std::to_string(visualNode.id)).c_str(), alias_buf, sizeof(alias_buf)))
+        std::array<char, 256> alias_buf{};
+        snprintf(alias_buf.data(), alias_buf.size(), "%s", visualNode.alias.c_str());
+        if (ImGui::InputText(("##alias_" + std::to_string(visualNode.id)).c_str(), alias_buf.data(), alias_buf.size()))
         {
-            visualNode.alias = alias_buf;
+            std::string oldAlias = visualNode.alias;
+            std::string newAlias = alias_buf.data();
+            visualNode.alias = newAlias;
+
+
+            // Mise à jour en direct des projections rattachées à ce nœud
+            if (!oldAlias.empty() && !newAlias.empty() && oldAlias != newAlias)
+            {
+                std::string oldPrefix = oldAlias + ".";
+                std::string newPrefix = newAlias + ".";
+                for (auto &item : m_projectionItems)
+                {
+                    if (!item.isCustomExpression && item.sourceNodeId == visualNode.id)
+                    {
+                        if (item.sqlExpression.starts_with(oldPrefix))
+                        {
+                            item.sqlExpression.replace(0, oldPrefix.length(), newPrefix);
+                        }
+                    }
+                }
+            }
         }
+
 
         ImGui::Spacing();
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
 
-        if (m_activeProject && m_activeProject->datasets().contains(visualNode.datasetName))
+        // Helper interne pour dessiner une ligne de colonne (commune aux Tables et aux CTE)
+        auto drawColumnRow = [&](size_t index, const std::string &raw_col_name, const std::string &raw_col_type)
         {
-            const auto &dataset = m_activeProject->datasets().at(visualNode.datasetName);
+            std::string field_name = raw_col_name;
+            if (field_name.length() > 14)
+                field_name = field_name.substr(0, 11) + "...";
+
+            uintptr_t input_pin_id = (visualNode.id * 1000) + index;
+            ed::BeginPin(input_pin_id, ed::PinKind::Input);
+
+            ImGui::PushID(static_cast<int>((visualNode.id * 1000) + index));
+            bool is_selected = visualNode.selectedColumns.contains(index);
+            if (ImGui::Checkbox("##select_col", &is_selected))
+            {
+                std::string qual_expr = visualNode.alias.empty() ? raw_col_name : (visualNode.alias + "." + raw_col_name);
+                std::string default_alias = visualNode.alias.empty() ? raw_col_name : (visualNode.alias + "_" + raw_col_name);
+
+                if (is_selected)
+                {
+                    visualNode.selectedColumns.insert(index);
+
+                    auto it = std::find_if(m_projectionItems.begin(), m_projectionItems.end(),
+                                           [&qual_expr](const VisualProjectionItem &item)
+                                           { return !item.isCustomExpression && item.sqlExpression == qual_expr; });
+                    if (it == m_projectionItems.end())
+                    {
+                        uintptr_t nextId = m_projectionItems.size() + 70000;
+                        m_projectionItems.push_back(VisualProjectionItem{
+                            nextId, default_alias, qual_expr, false, false, visualNode.id});
+                    }
+
+
+                    if (!m_hasProjectionNode)
+                    {
+                        m_hasProjectionNode = true;
+                        m_needsProjectionPosInit = true;
+                    }
+                }
+                else
+                {
+                    visualNode.selectedColumns.erase(index);
+                    std::erase_if(m_projectionItems,
+                                  [&qual_expr](const VisualProjectionItem &item)
+                                  { return !item.isCustomExpression && item.sqlExpression == qual_expr; });
+                }
+            }
+            ImGui::PopID();
+
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", field_name.c_str());
+            ed::EndPin();
+
             float type_local_offset = 140.0f;
             float right_pin_offset = 280.0f;
 
-            for (const auto &[index, colObj] : dataset.columns())
+            ImGui::SameLine(type_local_offset);
+            std::string field_type = raw_col_type;
+            if (field_type.length() > 16)
+                field_type = field_type.substr(0, 13) + "...";
+            ImGui::TextColored(ImVec4(0.4f, 0.75f, 0.4f, 0.75f), ":  %s", field_type.c_str());
+
+            ImGui::SameLine(right_pin_offset);
+            uintptr_t output_pin_id = (visualNode.id * 1000) + index + 500;
+            ed::BeginPin(output_pin_id, ed::PinKind::Output);
+            ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 0.5f), ICON_LC_CHEVRON_RIGHT);
+            ed::EndPin();
+        };
+
+        // Branche A : Nœud CTE (lit le schéma déduit via LIMIT 0 de la SavedQuery)
+        if (visualNode.isCTE)
+        {
+            const SavedQuery *foundQuery = nullptr;
+            for (const auto &sq : m_savedQueries)
             {
-                std::string field_name = colObj.name();
-                if (field_name.length() > 14)
-                    field_name = field_name.substr(0, 11) + "...";
-
-                uintptr_t input_pin_id = (visualNode.id * 1000) + index;
-                ed::BeginPin(input_pin_id, ed::PinKind::Input);
-
-                ImGui::PushID(static_cast<int>((visualNode.id * 1000) + index));
-                bool is_selected = visualNode.selectedColumns.contains(index);
-                if (ImGui::Checkbox("##select_col", &is_selected))
+                if (sq.name == visualNode.datasetName)
                 {
-                    std::string raw_col_name = colObj.name();
-                    std::string qual_expr = visualNode.alias.empty() ? raw_col_name : (visualNode.alias + "." + raw_col_name);
-                    std::string default_alias = visualNode.alias.empty() ? raw_col_name : (visualNode.alias + "_" + raw_col_name);
+                    foundQuery = &sq;
+                    break;
+                }
+            }
 
-                    if (is_selected)
+            if (foundQuery)
+            {
+                if (foundQuery->outputSchema.empty())
+                {
+                    ImGui::TextDisabled("  (Schéma vide - réenregistrez la requête)");
+                }
+                else
+                {
+                    for (size_t idx = 0; idx < foundQuery->outputSchema.size(); ++idx)
                     {
-                        visualNode.selectedColumns.insert(index);
-
-                        // Ajout automatique dans la liste unifiée de projection si absent
-                        auto it = std::find_if(m_projectionItems.begin(), m_projectionItems.end(),
-                                               [&qual_expr](const VisualProjectionItem &item)
-                                               { return !item.isCustomExpression && item.sqlExpression == qual_expr; });
-                        if (it == m_projectionItems.end())
-                        {
-                            uintptr_t nextId = m_projectionItems.size() + 70000;
-                            m_projectionItems.push_back(VisualProjectionItem{nextId, default_alias, qual_expr, false, false});
-                        }
-
-                        // Affiche le nœud de projection sur le canevas dès la première sélection
-                        if (!m_hasProjectionNode)
-                        {
-                            m_hasProjectionNode = true;
-                            m_needsProjectionPosInit = true;
-                        }
-                    }
-                    else
-                    {
-                        visualNode.selectedColumns.erase(index);
-                        std::erase_if(m_projectionItems,
-                                      [&qual_expr](const VisualProjectionItem &item)
-                                      { return !item.isCustomExpression && item.sqlExpression == qual_expr; });
+                        drawColumnRow(idx, foundQuery->outputSchema[idx].name, foundQuery->outputSchema[idx].dataType);
                     }
                 }
-                ImGui::PopID();
-
-                ImGui::SameLine();
-                ImGui::TextDisabled("%s", field_name.c_str());
-                ed::EndPin();
-
-                ImGui::SameLine(type_local_offset);
-                std::string field_type = colObj.type();
-                if (field_type.length() > 16)
-                    field_type = field_type.substr(0, 13) + "...";
-                ImGui::TextColored(ImVec4(0.4f, 0.75f, 0.4f, 0.75f), ":  %s", field_type.c_str());
-
-                ImGui::SameLine(right_pin_offset);
-                uintptr_t output_pin_id = (visualNode.id * 1000) + index + 500;
-                ed::BeginPin(output_pin_id, ed::PinKind::Output);
-                ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 0.5f), ICON_LC_CHEVRON_RIGHT);
-                ed::EndPin();
+            }
+            else
+            {
+                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "  Requête introuvable !");
             }
         }
+        // Branche B : Dataset physique classique
+        else if (m_activeProject && m_activeProject->datasets().contains(visualNode.datasetName))
+        {
+            const auto &dataset = m_activeProject->datasets().at(visualNode.datasetName);
+            for (const auto &[index, colObj] : dataset.columns())
+            {
+                drawColumnRow(index, colObj.name(), colObj.type());
+            }
+        }
+
         ImGui::Spacing();
         ImGui::EndGroup();
         ed::EndNode();
+
+        if (visualNode.isCTE)
+        {
+            ed::PopStyleColor();
+        }
     }
 }
 
@@ -3432,6 +3630,46 @@ void Application::renderCanvasJoinNodes()
 
 void Application::handleCanvasActions()
 {
+
+    // Helper interne pour résoudre "alias.nom_colonne" depuis n'importe quel pin_id (Table OU CTE)
+    auto resolvePinQualifiedName = [&](uintptr_t pinId) -> std::string
+    {
+        uintptr_t nodeId = pinId / 1000;
+        size_t rawOffset = pinId % 1000;
+        size_t colIdx = (rawOffset >= 500) ? (rawOffset - 500) : rawOffset;
+
+        for (const auto &node : m_visualQueryNodes)
+        {
+            if (node.id != nodeId)
+                continue;
+
+            std::string prefix = node.alias.empty() ? "" : (node.alias + ".");
+
+            // Cas 1 : Le nœud est une CTE (SavedQuery)
+            if (node.isCTE)
+            {
+                for (const auto &sq : m_savedQueries)
+                {
+                    if (sq.name == node.datasetName && colIdx < sq.outputSchema.size())
+                    {
+                        return prefix + sq.outputSchema[colIdx].name;
+                    }
+                }
+            }
+            // Cas 2 : Le nœud est une Table physique (Dataset)
+            else if (m_activeProject && m_activeProject->datasets().contains(node.datasetName))
+            {
+                const auto &ds = m_activeProject->datasets().at(node.datasetName);
+                if (ds.columns().contains(colIdx))
+                {
+                    return prefix + ds.columns().at(colIdx).name();
+                }
+            }
+        }
+        return "";
+    };
+
+
     if (ed::BeginCreate())
     {
         ed::PinId startPinId, endPinId;
@@ -3443,6 +3681,45 @@ void Application::handleCanvasActions()
             bool dst_is_filter = (pin_dst >= 500000);
             ImVec4 wire_color = (src_is_filter || dst_is_filter) ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f) : ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
 
+            // Helper interne pour résoudre "alias.colonne" depuis une Table OU une CTE
+            auto resolvePinQualifiedName = [&](uintptr_t pin_id, const std::string &fallback) -> std::string
+            {
+                uintptr_t node_id = pin_id / 1000;
+                uintptr_t col_idx = pin_id % 1000;
+                if (col_idx >= 500)
+                    col_idx -= 500;
+
+                for (const auto &n : m_visualQueryNodes)
+                {
+                    if (n.id != node_id)
+                        continue;
+
+                    std::string prefix = n.alias.empty() ? "" : (n.alias + ".");
+
+                    // Cas 1 : Nœud CTE (SavedQuery)
+                    if (n.isCTE)
+                    {
+                        for (const auto &sq : m_savedQueries)
+                        {
+                            if (sq.name == n.datasetName && col_idx < sq.outputSchema.size())
+                            {
+                                return prefix + sq.outputSchema[col_idx].name;
+                            }
+                        }
+                    }
+                    // Cas 2 : Nœud Table physique (Dataset)
+                    else if (m_activeProject && m_activeProject->datasets().contains(n.datasetName))
+                    {
+                        const auto &ds = m_activeProject->datasets().at(n.datasetName);
+                        if (ds.columns().contains(col_idx))
+                        {
+                            return prefix + ds.columns().at(col_idx).name();
+                        }
+                    }
+                }
+                return fallback;
+            };
+
             if (ed::AcceptNewItem(wire_color, 2.5f))
             {
                 uintptr_t table_pin = src_is_filter ? pin_dst : pin_src;
@@ -3451,22 +3728,8 @@ void Application::handleCanvasActions()
                 if (src_is_filter || dst_is_filter)
                 {
                     uintptr_t filter_node_id = (filter_pin >= 550000) ? (filter_pin - 550000) : (filter_pin - 500000);
-                    std::string column_name = "colonne";
-                    uintptr_t table_node_id = table_pin / 1000;
-                    uintptr_t col_idx = table_pin % 1000;
-                    if (col_idx >= 500)
-                        col_idx -= 500;
-                    for (const auto &n : m_visualQueryNodes)
-                    {
-                        if (n.id == table_node_id && m_activeProject && m_activeProject->datasets().contains(n.datasetName))
-                        {
-                            const auto &ds = m_activeProject->datasets().at(n.datasetName);
-                            if (ds.columns().contains(col_idx))
-                            {
-                                column_name = n.alias + "." + ds.columns().at(col_idx).name();
-                            }
-                        }
-                    }
+                    std::string column_name = resolvePinQualifiedName(table_pin, "colonne");
+
                     for (auto &pred : m_visualQueryPredicates)
                     {
                         if (pred.id == filter_node_id)
@@ -3479,29 +3742,9 @@ void Application::handleCanvasActions()
                 else
                 {
                     uintptr_t new_id = m_visualQueryLinks.size() + 1;
-                    std::string src_name = "col_A";
-                    std::string dst_name = "col_B";
-                    uintptr_t src_node = pin_src / 1000;
-                    uintptr_t src_col = pin_src % 1000;
-                    if (src_col >= 500)
-                        src_col -= 500;
-                    uintptr_t dst_node = pin_dst / 1000;
-                    uintptr_t dst_col = pin_dst % 1000;
-                    if (dst_col >= 500)
-                        dst_col -= 500;
-                    for (const auto &n : m_visualQueryNodes)
-                    {
-                        if (n.id == src_node && m_activeProject && m_activeProject->datasets().contains(n.datasetName))
-                        {
-                            if (m_activeProject->datasets().at(n.datasetName).columns().contains(src_col))
-                                src_name = n.alias + "." + m_activeProject->datasets().at(n.datasetName).columns().at(src_col).name();
-                        }
-                        if (n.id == dst_node && m_activeProject->datasets().contains(n.datasetName))
-                        {
-                            if (m_activeProject->datasets().at(n.datasetName).columns().contains(dst_col))
-                                dst_name = n.alias + "." + m_activeProject->datasets().at(n.datasetName).columns().at(dst_col).name();
-                        }
-                    }
+                    std::string src_name = resolvePinQualifiedName(pin_src, "col_A");
+                    std::string dst_name = resolvePinQualifiedName(pin_dst, "col_B");
+
                     VisualQueryLink newLink{new_id, pin_src, pin_dst, new_id + 5000, new_id + 10000, new_id + 15000, cppsqlx::JoinType::INNER, src_name, dst_name, cppsqlx::SQLOperator::Equal};
 
                     // Initialisation de la coordonnée à 0 pour forcer le premier calcul d'alignement
@@ -3511,6 +3754,7 @@ void Application::handleCanvasActions()
             }
         }
     }
+
     ed::EndCreate();
 
     if (ed::BeginDelete())

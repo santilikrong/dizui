@@ -53,11 +53,12 @@ private:
     struct VisualQueryNode
     {
         uintptr_t id;
-        std::string datasetName;
+        std::string datasetName; // Nom du Dataset physique OU nom de la SavedQuery (CTE)
         ImVec2 position;
         bool needsPositionInitialization = true;
         std::string alias;
         std::set<size_t> selectedColumns;
+        bool isCTE = false; // Vrai si ce nœud provient d'une SavedQuery utilisée en CTE
     };
 
     struct VisualQueryLink
@@ -107,11 +108,13 @@ private:
     struct VisualProjectionItem
     {
         uintptr_t id;
-        std::string alias;               // Nom de colonne en sortie (ex: "emp_nom", "nom_complet", "total_ca")
-        std::string sqlExpression;       // Expression SQL (ex: "emp.nom" ou "CONCAT(emp.prenom, ' ', emp.nom)")
-        bool isAggregate = false;        // Vrai si fonction d'agrégation (SUM, COUNT, AVG, MIN, MAX)
-        bool isCustomExpression = false; // Vrai si créé/édité via l'éditeur d'expressions (non lié à une case à cocher)
+        std::string alias;
+        std::string sqlExpression;
+        bool isAggregate = false;
+        bool isCustomExpression = false;
+        uintptr_t sourceNodeId = 0; // Identifiant du nœud source (Table ou CTE)
     };
+
 
     struct SavedQuery
     {
@@ -120,7 +123,9 @@ private:
         std::string sql;
         nlohmann::json visualState;
         nlohmann::json compiledSelectJson;
+        std::vector<cppsqlx::ColumnMetadata> outputSchema; // Colonnes déduites via LIMIT 0
     };
+
 
     struct WorkflowJobNode
     {
