@@ -990,9 +990,8 @@ void Application::executeVisualQuery(const std::string &sql)
             if (gateway.environments().contains(m_selectedContext))
             {
                 const auto &phys = gateway.environments().at(m_selectedContext);
-                std::string connStr = "dbname=" + phys.dbname_ + " user=" + phys.dbuser_ + " host=" + phys.dbhost_ + " port=" + std::to_string(phys.dbport_) + " sslmode=disable";
 
-                cppsqlx::Connection execConn(connStr);
+                cppsqlx::Connection execConn(phys.toConnectionString());
                 auto connectRes = execConn.connect();
 
                 if (execConn.isConnected())
@@ -1023,9 +1022,10 @@ void Application::executeVisualQuery(const std::string &sql)
                 }
                 else
                 {
-                    m_executionError = "Impossible de se connecter à la base cible.";
+                    m_executionError = "Échec de connexion : " + (!connectRes ? connectRes.error() : "Impossible de joindre le serveur cible.");
                 }
             }
+
         }
     }
     catch (const std::exception &e)
@@ -2037,21 +2037,24 @@ void Application::renderReverseEngineeringModal()
 
     if (ImGui::BeginPopupModal("Reverse Engineering - Catalogue PostgreSQL", &m_showReverseModal, ImGuiWindowFlags_None))
     {
+        static std::string last_gateway = "";
         static std::string last_env = "";
         using PgConnectionPtr = std::shared_ptr<cppsqlx::Connection>;
         static PgConnectionPtr modalConn = nullptr;
 
-        if (!modalConn || last_env != m_selectedContext)
+        if (!modalConn || last_gateway != m_selectedGateway || last_env != m_selectedContext)
         {
+            last_gateway = m_selectedGateway;
             last_env = m_selectedContext;
+            modalConn.reset();
+
             if (m_activeProject && m_activeProject->logicalConnections().contains(m_selectedGateway))
             {
                 const auto &gateway = m_activeProject->logicalConnections().at(m_selectedGateway);
                 if (gateway.environments().contains(m_selectedContext))
                 {
                     const auto &phys = gateway.environments().at(m_selectedContext);
-                    std::string connStr = "dbname=" + phys.dbname_ + " user=" + phys.dbuser_ + " host=" + phys.dbhost_ + " port=" + std::to_string(phys.dbport_) + " sslmode=disable";
-                    modalConn = PgConnectionPtr(new cppsqlx::Connection(connStr));
+                    modalConn = PgConnectionPtr(new cppsqlx::Connection(phys.toConnectionString()));
                     modalConn->connect();
                 }
             }
