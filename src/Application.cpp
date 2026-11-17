@@ -2112,22 +2112,61 @@ void Application::renderReverseEngineeringModal()
                 m_cachedTables = std::move(*tablesRes);
         }
 
+        // Champ de filtre rapide pour les schémas volumineux
+        static char tableFilterBuf[128] = "";
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##TableSearchFilter", "Filtrer les tables...", tableFilterBuf, IM_ARRAYSIZE(tableFilterBuf));
+        ImGui::Spacing();
+
         if (ImGui::TreeNodeEx("Tables", ImGuiTreeNodeFlags_DefaultOpen))
         {
+            // Construction de la liste filtrée (insensible à la casse)
+            std::vector<const std::string*> filteredTables;
+            filteredTables.reserve(m_cachedTables.size());
+            std::string filterStr(tableFilterBuf);
+            std::transform(filterStr.begin(), filterStr.end(), filterStr.begin(), ::tolower);
+
             for (const auto &tbl : m_cachedTables)
             {
-                ImGui::PushID(tbl.c_str());
-                if (ImGui::Selectable(tbl.c_str(), m_reverseSelectedObject == tbl))
+                if (filterStr.empty())
                 {
-                    m_reverseSelectedObject = tbl;
-                    auto structRes = metaDiscover.getTableStructure(m_reverseSelectedObject, m_reverseSelectedSchema);
-                    if (structRes)
-                        m_cachedStructure = std::move(*structRes);
+                    filteredTables.push_back(&tbl);
                 }
-                ImGui::PopID();
+                else
+                {
+                    std::string lowerTbl = tbl;
+                    std::transform(lowerTbl.begin(), lowerTbl.end(), lowerTbl.begin(), ::tolower);
+                    if (lowerTbl.find(filterStr) != std::string::npos)
+                    {
+                        filteredTables.push_back(&tbl);
+                    }
+                }
             }
+
+            // Virtualisation du rendu : ne dessine que les lignes visibles à l'écran
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(filteredTables.size()));
+            while (clipper.Step())
+            {
+                for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row)
+                {
+                    const std::string &tbl = *filteredTables[row];
+                    ImGui::PushID(row);
+                    if (ImGui::Selectable(tbl.c_str(), m_reverseSelectedObject == tbl))
+                    {
+                        m_reverseSelectedObject = tbl;
+                        auto structRes = metaDiscover.getTableStructure(m_reverseSelectedObject, m_reverseSelectedSchema);
+                        if (structRes)
+                            m_cachedStructure = std::move(*structRes);
+                    }
+                    ImGui::PopID();
+                }
+            }
+            clipper.End();
+
             ImGui::TreePop();
         }
+
         ImGui::EndChild();
 
         ImGui::SameLine();
@@ -2496,7 +2535,7 @@ void Application::renderOpenProjectModal()
 {
     if (m_showOpenProjectModal)
         ImGui::OpenPopup("Ouvrir un projet");
-    ImGui::SetNextWindowSize(ImVec2(640.0f, 420.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(740.0f, 520.0f), ImGuiCond_Once);
     ImGui::SetNextWindowSizeConstraints(ImVec2(500.0f, 320.0f), ImVec2(1200.0f, 800.0f));
     if (ImGui::BeginPopupModal("Ouvrir un projet", &m_showOpenProjectModal, ImGuiWindowFlags_None))
     {
@@ -4166,7 +4205,7 @@ void Application::renderWorkflowModals()
     // MODALE 1 : APERÇU DU JSON DU WORKFLOW
     if (m_showWorkflowJsonModal)
         ImGui::OpenPopup("Aperçu JSON du Workflow");
-    ImGui::SetNextWindowSize(ImVec2(700.0f, 450.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(800.0f, 550.0f), ImGuiCond_Once);
     ImGui::SetNextWindowSizeConstraints(ImVec2(450.0f, 250.0f), ImVec2(1600.0f, 900.0f));
     if (ImGui::BeginPopupModal("Aperçu JSON du Workflow", &m_showWorkflowJsonModal, ImGuiWindowFlags_None))
     {
