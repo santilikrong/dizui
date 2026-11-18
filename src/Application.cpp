@@ -1970,8 +1970,8 @@ void Application::renderProjectExplorerTree()
                     }
                     else
                     {
-                        int queryIndexToDelete = -1;
-                        int totalQueries = (int)m_savedQueries.size();
+                        int queryIndexToDuplicate = -1;
+                        int totalQueries = static_cast<int>(m_savedQueries.size());
 
                         for (int i = 0; i < totalQueries; ++i)
                         {
@@ -1986,10 +1986,21 @@ void Application::renderProjectExplorerTree()
 
                             if (ImGui::BeginPopupContextItem("QueryContextMenu"))
                             {
-                                if (ImGui::MenuItem("Éditer dans le designer"))
+                                ImGui::TextDisabled("%s Requête : %s", ICON_LC_FILE_TEXT, saved.name.c_str());
+                                ImGui::Separator();
+
+                                if (ImGui::MenuItem((std::string(ICON_LC_FOLDER_OPEN) + "  Éditer dans le designer").c_str()))
                                     loadQueryIntoVisualDesigner(saved);
 
-                                if (ImGui::MenuItem("Renommer"))
+                                if (ImGui::MenuItem((std::string(ICON_LC_SEARCH) + "  Inspecter le SQL et le Schéma...").c_str()))
+                                {
+                                    m_inspectingQueryIndex = i;
+                                    m_showInspectQueryModal = true;
+                                }
+
+                                ImGui::Separator();
+
+                                if (ImGui::MenuItem((std::string(ICON_LC_TYPE) + "  Renommer...").c_str()))
                                 {
                                     m_renamingQueryIndex = i;
                                     strncpy(m_renameQueryBuf, saved.name.c_str(), sizeof(m_renameQueryBuf) - 1);
@@ -1997,13 +2008,22 @@ void Application::renderProjectExplorerTree()
                                     m_showRenameQueryModal = true;
                                 }
 
+                                if (ImGui::MenuItem((std::string(ICON_LC_COPY) + "  Dupliquer").c_str()))
+                                    queryIndexToDuplicate = i;
+
                                 ImGui::Separator();
+
                                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
-                                if (ImGui::MenuItem("Supprimer du projet"))
-                                    queryIndexToDelete = i;
+                                if (ImGui::MenuItem((std::string(ICON_LC_TRASH) + "  Supprimer du projet...").c_str()))
+                                {
+                                    m_deletingQueryIndex = i;
+                                    m_showDeleteQueryModal = true;
+                                }
                                 ImGui::PopStyleColor();
+
                                 ImGui::EndPopup();
                             }
+
                             if (ImGui::IsItemHovered())
                             {
                                 if (!saved.description.empty())
@@ -2011,6 +2031,7 @@ void Application::renderProjectExplorerTree()
                                 else
                                     ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options");
                             }
+
                             if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
                             {
                                 ImGui::SetDragDropPayload("DND_CTE_QUERY_NODE", saved.name.c_str(), saved.name.size() + 1);
@@ -2022,11 +2043,26 @@ void Application::renderProjectExplorerTree()
                             drawLargeIconText(ICON_LC_FILE_TEXT, saved.name.c_str(), 12.0f);
                             ImGui::PopID();
                         }
-                        if (queryIndexToDelete >= 0)
-                            m_savedQueries.erase(m_savedQueries.begin() + queryIndexToDelete);
+
+                        // Duplication différée hors de la boucle d'itération
+                        if (queryIndexToDuplicate >= 0 && queryIndexToDuplicate < static_cast<int>(m_savedQueries.size()))
+                        {
+                            SavedQuery copy = m_savedQueries[queryIndexToDuplicate];
+                            std::string baseName = copy.name + "_copie";
+                            std::string finalName = baseName;
+                            int suffix = 2;
+                            while (std::any_of(m_savedQueries.begin(), m_savedQueries.end(),
+                                               [&finalName](const SavedQuery &q) { return q.name == finalName; }))
+                            {
+                                finalName = baseName + "_" + std::to_string(suffix++);
+                            }
+                            copy.name = finalName;
+                            m_savedQueries.push_back(std::move(copy));
+                        }
                     }
                     ImGui::TreePop();
                 }
+
                 // 6. Tâches (Pipelines)
                 ImGui::PushID("TasksHeaderNode");
                 bool tasks_open = ImGui::TreeNode("Tâches (Pipelines)");
@@ -2050,19 +2086,76 @@ void Application::renderProjectExplorerTree()
                     }
                     else
                     {
-                        for (const auto &task : m_savedTasks)
+                        std::string taskToDuplicate = "";
+
+                        for (size_t tIdx = 0; tIdx < m_savedTasks.size(); ++tIdx)
                         {
+                            const auto &task = m_savedTasks[tIdx];
                             ImGui::PushID(task.name().c_str());
                             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
                             std::string row_label = std::string(ICON_LC_ACTIVITY) + "  " + task.name();
-                            bool is_selected = false;
-                            ImGui::Selectable(row_label.c_str(), &is_selected, ImGuiSelectableFlags_None, ImVec2(0.0f, 22.0f));
+
+                            if (ImGui::Selectable(row_label.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0.0f, 22.0f)))
+                            {
+                                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                                {
+                                    m_targetTaskName = task.name();
+                                    m_editTaskUnits.clear();
+                                    for (const auto &[stepId, unit] : task.steps())
+                                        m_editTaskUnits.push_back(unit);
+                                    m_showEditTaskModal = true;
+                                }
+                            }
+
+                            // 1. Menu contextuel clic droit sur la Tâche
+                            if (ImGui::BeginPopupContextItem(("TaskItemCtx_" + task.name()).c_str(), ImGuiPopupFlags_MouseButtonRight))
+                            {
+                                ImGui::TextDisabled("%s Pipeline : %s", ICON_LC_ACTIVITY, task.name().c_str());
+                                ImGui::Separator();
+
+                                if (ImGui::MenuItem((std::string(ICON_LC_EDIT) + "  Éditer les étapes...").c_str()))
+                                {
+                                    m_targetTaskName = task.name();
+                                    m_editTaskUnits.clear();
+                                    for (const auto &[stepId, unit] : task.steps())
+                                        m_editTaskUnits.push_back(unit);
+                                    m_showEditTaskModal = true;
+                                }
+
+                                if (ImGui::MenuItem((std::string(ICON_LC_TYPE) + "  Renommer...").c_str()))
+                                {
+                                    m_targetTaskName = task.name();
+                                    snprintf(m_editTaskNameBuf, sizeof(m_editTaskNameBuf), "%s", task.name().c_str());
+                                    m_showRenameTaskModal = true;
+                                }
+
+                                if (ImGui::MenuItem((std::string(ICON_LC_COPY) + "  Dupliquer").c_str()))
+                                {
+                                    taskToDuplicate = task.name();
+                                }
+
+                                ImGui::Separator();
+
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+                                if (ImGui::MenuItem((std::string(ICON_LC_TRASH) + "  Supprimer").c_str()))
+                                {
+                                    m_targetTaskName = task.name();
+                                    m_showDeleteTaskModal = true;
+                                }
+                                ImGui::PopStyleColor();
+
+                                ImGui::EndPopup();
+                            }
+
+                            // 2. Source Drag & Drop vers le Workflow Designer
                             if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
                             {
                                 ImGui::SetDragDropPayload("DND_WORKFLOW_TASK_NODE", task.name().c_str(), task.name().length() + 1);
                                 ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "%s  Planifier : %s", ICON_LC_ACTIVITY, task.name().c_str());
                                 ImGui::EndDragDropSource();
                             }
+
+                            // 3. Info-bulle des étapes
                             if (ImGui::IsItemHovered())
                             {
                                 std::string tooltip_txt = "Pipeline : " + task.name() + "\nÉtapes séquentielles :";
@@ -2077,10 +2170,34 @@ void Application::renderProjectExplorerTree()
                             }
                             ImGui::PopID();
                         }
+
+                        // Traitement différé de la duplication hors de la boucle
+                        if (!taskToDuplicate.empty())
+                        {
+                            auto it = std::find_if(m_savedTasks.begin(), m_savedTasks.end(),
+                                                   [&taskToDuplicate](const cppsqlx::Task &t) { return t.name() == taskToDuplicate; });
+                            if (it != m_savedTasks.end())
+                            {
+                                std::string copyName = taskToDuplicate + "_copie";
+                                int suffix = 2;
+                                while (std::any_of(m_savedTasks.begin(), m_savedTasks.end(),
+                                                   [&copyName](const cppsqlx::Task &t) { return t.name() == copyName; }))
+                                {
+                                    copyName = taskToDuplicate + "_copie_" + std::to_string(suffix++);
+                                }
+                                cppsqlx::Task clonedTask(copyName);
+                                for (const auto &[stepId, unit] : it->steps())
+                                {
+                                    clonedTask.addStep(stepId, unit);
+                                }
+                                m_savedTasks.push_back(std::move(clonedTask));
+                            }
+                        }
                     }
                     ImGui::TreePop();
                 }
                 ImGui::PopID();
+
                 // 7. Registre des Jobs
                 if (ImGui::TreeNode("Registre des Jobs"))
                 {
@@ -2254,6 +2371,8 @@ void Application::renderGlobalModals()
     renderOpenProjectModal();
     renderRenameModals();
     renderConnectionModals();
+    renderTaskManagementModals();
+    renderQueryInspectAndDeleteModals();
 }
 
 void Application::renderReverseEngineeringModal()
@@ -2885,14 +3004,28 @@ void Application::renderRenameModals()
         bool isValid = (strlen(m_renameQueryBuf) > 0);
         if (!isValid)
             ImGui::BeginDisabled();
-        if (ImGui::Button("Valider", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
+        if (ImGui::Button("Valider", ImVec2(110.0f, 0.0f)))
         {
             if (m_renamingQueryIndex >= 0 && m_renamingQueryIndex < static_cast<int>(m_savedQueries.size()))
             {
-                m_savedQueries[m_renamingQueryIndex].name = std::string(m_renameQueryBuf);
+                std::string oldName = m_savedQueries[m_renamingQueryIndex].name;
+                std::string newName(m_renameQueryBuf);
+
+                if (!newName.empty() && oldName != newName)
+                {
+                    m_savedQueries[m_renamingQueryIndex].name = newName;
+
+                    // Synchronise les nœuds CTE déjà ouverts sur le canevas
+                    for (auto &vNode : m_visualQueryNodes)
+                    {
+                        if (vNode.isCTE && vNode.datasetName == oldName)
+                        {
+                            vNode.datasetName = newName;
+                        }
+                    }
+                }
             }
             m_showRenameQueryModal = false;
-            m_renamingQueryIndex = -1;
             ImGui::CloseCurrentPopup();
         }
         if (!isValid)
@@ -3456,7 +3589,6 @@ void Application::handleCanvasInteraction()
         }
     }
 }
-
 
 
 void Application::renderCanvasDatasetNodes()
@@ -5599,5 +5731,335 @@ void Application::renderConsolePanel()
     ImGui::End();
 }
 
+void Application::renderTaskManagementModals()
+{
+    // =========================================================================
+    // 1. MODALE D'ÉDITION / RÉORGANISATION DES ÉTAPES
+    // =========================================================================
+    if (m_showEditTaskModal)
+        ImGui::OpenPopup("Éditer les Étapes de la Tâche");
+
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 470.0f), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("Éditer les Étapes de la Tâche", &m_showEditTaskModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  Pipeline : %s", ICON_LC_ACTIVITY, m_targetTaskName.c_str());
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Zone d'ajout d'une nouvelle étape depuis les requêtes enregistrées
+        ImGui::Text("Ajouter une nouvelle étape :");
+        static int s_editTaskQueryIdx = 0;
+        static std::array<char, 256> s_editTaskNewStepName{};
+
+        if (m_savedQueries.empty())
+        {
+            ImGui::TextDisabled("  (Aucune requête enregistrée disponible dans le projet)");
+        }
+        else
+        {
+            if (s_editTaskQueryIdx >= static_cast<int>(m_savedQueries.size()))
+                s_editTaskQueryIdx = 0;
+
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::BeginCombo("##EditTaskQueryCombo", m_savedQueries[s_editTaskQueryIdx].name.c_str()))
+            {
+                for (int qIdx = 0; qIdx < static_cast<int>(m_savedQueries.size()); ++qIdx)
+                {
+                    if (ImGui::Selectable(m_savedQueries[qIdx].name.c_str(), s_editTaskQueryIdx == qIdx))
+                    {
+                        s_editTaskQueryIdx = qIdx;
+                        if (strlen(s_editTaskNewStepName.data()) == 0)
+                        {
+                            snprintf(s_editTaskNewStepName.data(), s_editTaskNewStepName.size(), "%s", m_savedQueries[qIdx].name.c_str());
+                        }
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(160.0f);
+            ImGui::InputTextWithHint("##EditTaskStepLabel", "Nom de l'étape...", s_editTaskNewStepName.data(), s_editTaskNewStepName.size());
+
+            ImGui::SameLine();
+            if (ImGui::Button((std::string(ICON_LC_PLUS) + " Ajouter une étape").c_str(), ImVec2(145.0f, 0.0f)))
+            {
+                cppsqlx::UnitSelect newUnit{};
+                newUnit.name = (strlen(s_editTaskNewStepName.data()) > 0)
+                                   ? std::string(s_editTaskNewStepName.data())
+                                   : m_savedQueries[s_editTaskQueryIdx].name;
+                // NOTE : Remplacez la ligne ci-dessous par l'initialisation exacte de votre modale m_showCreateTaskModal
+                newUnit.query = cppsqlx::SelectQuery::fromJSON(m_savedQueries[s_editTaskQueryIdx].compiledSelectJson).value_or(cppsqlx::SelectQuery());
+
+                m_editTaskUnits.push_back(std::move(newUnit));
+                s_editTaskNewStepName.fill('\0');
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Liste ordonnée des étapes existantes
+        ImGui::Text("Séquence d'exécution (%d étape(s)) :", static_cast<int>(m_editTaskUnits.size()));
+        ImGui::BeginChild("EditTaskStepsZone", ImVec2(-1.0f, 230.0f), true);
+
+        int moveUp = -1, moveDown = -1, removeIdx = -1;
+        for (int i = 0; i < static_cast<int>(m_editTaskUnits.size()); ++i)
+        {
+            ImGui::PushID(i);
+            ImGui::Text("[Step %d]  %s", i + 1, m_editTaskUnits[i].name.c_str());
+
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 95.0f);
+            if (ImGui::SmallButton(ICON_LC_ARROW_UP) && i > 0)
+                moveUp = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_LC_ARROW_DOWN) && i + 1 < static_cast<int>(m_editTaskUnits.size()))
+                moveDown = i;
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+            if (ImGui::SmallButton(ICON_LC_TRASH))
+                removeIdx = i;
+            ImGui::PopStyleColor();
+
+            ImGui::PopID();
+        }
+
+        if (moveUp > 0)
+            std::swap(m_editTaskUnits[moveUp], m_editTaskUnits[moveUp - 1]);
+        if (moveDown >= 0 && moveDown + 1 < static_cast<int>(m_editTaskUnits.size()))
+            std::swap(m_editTaskUnits[moveDown], m_editTaskUnits[moveDown + 1]);
+        if (removeIdx >= 0)
+            m_editTaskUnits.erase(m_editTaskUnits.begin() + removeIdx);
+
+        ImGui::EndChild();
+        ImGui::Spacing();
+
+        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        {
+            auto it = std::find_if(m_savedTasks.begin(), m_savedTasks.end(),
+                                   [this](const cppsqlx::Task &t) { return t.name() == m_targetTaskName; });
+            if (it != m_savedTasks.end())
+            {
+              cppsqlx::Task updatedTask(m_targetTaskName);
+              for (size_t idx = 0; idx < m_editTaskUnits.size(); ++idx)
+              {
+                  updatedTask.addStep(static_cast<int>(idx + 1), m_editTaskUnits[idx]);
+              }
+              *it = std::move(updatedTask);
+            }
+            m_showEditTaskModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Annuler", ImVec2(110.0f, 0.0f)))
+        {
+            m_showEditTaskModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+
+    // =========================================================================
+    // 2. MODALE DE RENOMMAGE (AVEC MISE À JOUR DU WORKFLOW DESIGNER)
+    // =========================================================================
+    if (m_showRenameTaskModal)
+        ImGui::OpenPopup("Renommer la Tâche");
+
+    ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("Renommer la Tâche", &m_showRenameTaskModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::Text("Nouveau nom pour '%s' :", m_targetTaskName.c_str());
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##RenameTaskBuf", m_editTaskNameBuf, sizeof(m_editTaskNameBuf));
+        ImGui::Spacing();
+
+        std::string newName(m_editTaskNameBuf);
+        bool canRename = !newName.empty() &&
+                         (newName == m_targetTaskName ||
+                          std::none_of(m_savedTasks.begin(), m_savedTasks.end(),
+                                       [&newName](const cppsqlx::Task &t) { return t.name() == newName; }));
+
+        if (!canRename)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Valider", ImVec2(110.0f, 0.0f)))
+        {
+            if (newName != m_targetTaskName)
+            {
+                auto it = std::find_if(m_savedTasks.begin(), m_savedTasks.end(),
+                                       [this](const cppsqlx::Task &t) { return t.name() == m_targetTaskName; });
+                if (it != m_savedTasks.end())
+                {
+                    cppsqlx::Task renamedTask(newName);
+                    for (const auto &[stepId, unit] : it->steps())
+                    {
+                        renamedTask.addStep(stepId, unit);
+                    }
+                    *it = std::move(renamedTask);
+
+                    // Mise à jour automatique des nœuds du Workflow Designer qui référencent cette tâche
+                    for (auto &wfNode : m_workflowNodes)
+                    {
+                        if (wfNode.taskName == m_targetTaskName)
+                            wfNode.taskName = newName;
+                    }
+                }
+            }
+            m_showRenameTaskModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!canRename)
+            ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        if (ImGui::Button("Annuler", ImVec2(110.0f, 0.0f)))
+        {
+            m_showRenameTaskModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // =========================================================================
+    // 3. MODALE DE CONFIRMATION DE SUPPRESSION
+    // =========================================================================
+    if (m_showDeleteTaskModal)
+        ImGui::OpenPopup("Supprimer la Tâche");
+
+    ImGui::SetNextWindowSize(ImVec2(420.0f, 155.0f), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("Supprimer la Tâche", &m_showDeleteTaskModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextWrapped("Supprimer définitivement la tâche '%s' du projet ?", m_targetTaskName.c_str());
+        ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.22f, 0.22f, 1.0f));
+        if (ImGui::Button("Supprimer", ImVec2(120.0f, 0.0f)))
+        {
+            std::erase_if(m_savedTasks, [this](const cppsqlx::Task &t) { return t.name() == m_targetTaskName; });
+            m_targetTaskName.clear();
+            m_showDeleteTaskModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        if (ImGui::Button("Annuler", ImVec2(110.0f, 0.0f)))
+        {
+            m_targetTaskName.clear();
+            m_showDeleteTaskModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+
+void Application::renderQueryInspectAndDeleteModals()
+{
+    // =========================================================================
+    // 1. MODALE D'INSPECTION DU SQL ET DU SCHÉMA DÉDUIT (LIMIT 0)
+    // =========================================================================
+    if (m_showInspectQueryModal)
+        ImGui::OpenPopup("Inspecter la Requête");
+
+    ImGui::SetNextWindowSize(ImVec2(620.0f, 440.0f), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("Inspecter la Requête", &m_showInspectQueryModal, ImGuiWindowFlags_NoResize))
+    {
+        if (m_inspectingQueryIndex >= 0 && m_inspectingQueryIndex < static_cast<int>(m_savedQueries.size()))
+        {
+            const auto &sq = m_savedQueries[m_inspectingQueryIndex];
+
+            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_FILE_TEXT, sq.name.c_str());
+            if (!sq.description.empty())
+                ImGui::TextDisabled("%s", sq.description.c_str());
+
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Tableau du schéma de sortie (colonnes disponibles en CTE)
+            ImGui::Text("Structure de sortie (%d colonne(s)) :", static_cast<int>(sq.outputSchema.size()));
+            ImGui::BeginChild("InspectQuerySchemaZone", ImVec2(-1.0f, 140.0f), true);
+            if (sq.outputSchema.empty())
+            {
+                ImGui::TextDisabled("Aucune métadonnée de colonne enregistrée.");
+            }
+            else if (ImGui::BeginTable("InspectQuerySchemaTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+            {
+                ImGui::TableSetupColumn("Colonne");
+                ImGui::TableSetupColumn("Type PostgreSQL");
+                ImGui::TableHeadersRow();
+                for (const auto &col : sq.outputSchema)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(col.name.c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextColored(ImVec4(0.4f, 0.75f, 0.4f, 0.85f), "%s", col.dataType.c_str());
+                }
+                ImGui::EndTable();
+            }
+            ImGui::EndChild();
+
+            ImGui::Spacing();
+            ImGui::Text("Requête SQL générée :");
+            std::string sqlBuf = sq.sql;
+            ImGui::InputTextMultiline("##InspectQuerySqlText", sqlBuf.data(), sqlBuf.size() + 1,
+                                      ImVec2(-1.0f, 150.0f), ImGuiInputTextFlags_ReadOnly);
+
+            ImGui::Spacing();
+            if (ImGui::Button((std::string(ICON_LC_COPY) + "  Copier le SQL").c_str(), ImVec2(140.0f, 0.0f)))
+            {
+                ImGui::SetClipboardText(sq.sql.c_str());
+            }
+            ImGui::SameLine();
+        }
+
+        if (ImGui::Button("Fermer", ImVec2(110.0f, 0.0f)))
+        {
+            m_showInspectQueryModal = false;
+            m_inspectingQueryIndex = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // =========================================================================
+    // 2. MODALE DE CONFIRMATION DE SUPPRESSION
+    // =========================================================================
+    if (m_showDeleteQueryModal)
+        ImGui::OpenPopup("Supprimer la Requête");
+
+    ImGui::SetNextWindowSize(ImVec2(430.0f, 155.0f), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("Supprimer la Requête", &m_showDeleteQueryModal, ImGuiWindowFlags_NoResize))
+    {
+        if (m_deletingQueryIndex >= 0 && m_deletingQueryIndex < static_cast<int>(m_savedQueries.size()))
+        {
+            const std::string &qName = m_savedQueries[m_deletingQueryIndex].name;
+            ImGui::TextWrapped("Voulez-vous vraiment supprimer la requête '%s' du projet ?", qName.c_str());
+            ImGui::Spacing();
+
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.22f, 0.22f, 1.0f));
+            if (ImGui::Button("Supprimer", ImVec2(120.0f, 0.0f)))
+            {
+                m_savedQueries.erase(m_savedQueries.begin() + m_deletingQueryIndex);
+                m_deletingQueryIndex = -1;
+                m_showDeleteQueryModal = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine();
+        }
+
+        if (ImGui::Button("Annuler", ImVec2(110.0f, 0.0f)))
+        {
+            m_deletingQueryIndex = -1;
+            m_showDeleteQueryModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
 
 

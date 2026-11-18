@@ -230,7 +230,8 @@ private:
     void addConsoleLog(const std::string &msg, LogLevel level = LogLevel::Info);
     void renderConsolePanel();
     void renderQueryResultsPanel();
-
+    void renderTaskManagementModals();
+    void renderQueryInspectAndDeleteModals();
 
 
     // =========================================================================
@@ -418,4 +419,19 @@ private:
 
     bool m_showQueryResultsPanel = true;
     bool m_focusQueryResultsTab = false;
+
+    bool m_showEditTaskModal = false;
+    bool m_showRenameTaskModal = false;
+    bool m_showDeleteTaskModal = false;
+    std::string m_targetTaskName = "";
+    char m_editTaskNameBuf[128] = "";
+    using TaskStepUnit = typename std::remove_cvref_t<decltype(std::declval<cppsqlx::Task>().steps())>::mapped_type;
+    std::vector<TaskStepUnit> m_editTaskUnits;
+
+    // Gestion contextuelle des Requêtes Enregistrées
+bool m_showInspectQueryModal = false;
+bool m_showDeleteQueryModal = false;
+int m_inspectingQueryIndex = -1;
+int m_deletingQueryIndex = -1;
+
 };
