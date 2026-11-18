@@ -237,6 +237,7 @@ private:
 
     void openCtePreviewModal(const std::string &cteQueryName);
     void renderCtePreviewModal();
+    void renderCteStackEditor();
 
 
     // =========================================================================

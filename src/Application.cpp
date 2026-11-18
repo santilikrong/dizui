@@ -2770,6 +2770,16 @@ void Application::renderMainContentZone()
             renderQueryTextEditor();
             ImGui::EndTabItem();
         }
+            if (ImGui::BeginTabItem((std::string(ICON_LC_LAYERS) + "  Pipeline CTE").c_str()))
+        {
+            isQueryVisualActive = true;
+            if (ImGui::IsItemActivated())
+            {
+                m_focusQueryResultsTab = true;
+            }
+            renderCteStackEditor();
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
     }
 
@@ -7292,5 +7302,346 @@ void Application::renderCtePreviewModal()
             ImGui::EndChild();
         }
         ImGui::EndPopup();
+    }
+}
+
+void Application::renderCteStackEditor()
+{
+    ImGui::Spacing();
+
+    // Barre d'outils supérieure
+    bool hasNodes = !m_visualQueryNodes.empty();
+    bool hasConnection = (m_activeProject &&
+                          m_activeProject->logicalConnections().contains(m_selectedGateway) &&
+                          m_activeProject->logicalConnections().at(m_selectedGateway).environments().contains(m_selectedContext));
+
+    if (!hasNodes || !hasConnection)
+        ImGui::BeginDisabled();
+
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.58f, 0.30f, 0.90f));
+    if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Exécuter le Pipeline Complet").c_str(), ImVec2(230.0f, 28.0f)))
+    {
+        std::string fullSql = compileVisualGraphToSelectQuery().toSQL();
+        executeRawSqlQuery(fullSql);
+    }
+    ImGui::PopStyleColor();
+
+    if (!hasNodes || !hasConnection)
+        ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (!hasNodes)
+        ImGui::BeginDisabled();
+    if (ImGui::Button((std::string(ICON_LC_FILE_TEXT) + "  Voir le SQL Compilé").c_str(), ImVec2(185.0f, 28.0f)))
+    {
+        std::string fullSql = compileVisualGraphToSelectQuery().toSQL();
+        snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", fullSql.c_str());
+        addConsoleLog("SQL compilé copié dans l'éditeur de texte.", LogLevel::Info);
+    }
+    if (!hasNodes)
+        ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("  |  Glissez des requêtes CTE ou des tables depuis l'explorateur à gauche");
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Zone défilante principale de l'empilement
+    ImGui::BeginChild("CteStackScrollRegion", ImVec2(-1.0f, -1.0f), false);
+
+    // Réception Drag & Drop directe si l'utilisateur glisse une CTE ou Table dans cette vue
+    if (ImGui::BeginDragDropTarget())
+    {
+        if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_CTE_QUERY_NODE"))
+        {
+            std::string cteName(static_cast<const char *>(payload->Data));
+            uintptr_t newId = 100;
+            for (const auto &n : m_visualQueryNodes)
+                if (n.id >= newId)
+                    newId = n.id + 1;
+
+            std::string alias = "cte_" + std::to_string(newId);
+            m_visualQueryNodes.push_back(VisualQueryNode{
+                newId, cteName, ImVec2(150.0f, 150.0f), true, alias, {}, true});
+        }
+        else if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_DATASET_NODE"))
+        {
+            std::string dsName(static_cast<const char *>(payload->Data));
+            uintptr_t newId = 100;
+            for (const auto &n : m_visualQueryNodes)
+                if (n.id >= newId)
+                    newId = n.id + 1;
+
+            std::string alias = dsName;
+            int suffix = 2;
+            while (std::any_of(m_visualQueryNodes.begin(), m_visualQueryNodes.end(),
+                               [&alias](const VisualQueryNode &n)
+                               { return n.alias == alias; }))
+            {
+                alias = dsName + "_" + std::to_string(suffix++);
+            }
+            m_visualQueryNodes.push_back(VisualQueryNode{
+                newId, dsName, ImVec2(150.0f, 150.0f), true, alias, {}, false});
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    if (m_visualQueryNodes.empty())
+    {
+        ImGui::Spacing();
+        ImGui::TextDisabled("   Aucune CTE ou table dans le pipeline.");
+        ImGui::TextDisabled("   Glissez-déposez des requêtes enregistrées ou des tables ici (ou depuis le Query Visual Designer).");
+        ImGui::EndChild();
+        return;
+    }
+
+    float cardWidth = std::min(780.0f, ImGui::GetContentRegionAvail().x - 20.0f);
+    float leftMargin = (ImGui::GetContentRegionAvail().x - cardWidth) * 0.5f;
+    if (leftMargin < 0.0f)
+        leftMargin = 0.0f;
+
+    int moveUpIdx = -1;
+    int moveDownIdx = -1;
+    int deleteIdx = -1;
+
+    // =========================================================================
+    // 1. EMPILEMENT SÉQUENTIEL DES CTE ET SOURCES
+    // =========================================================================
+    for (int i = 0; i < static_cast<int>(m_visualQueryNodes.size()); ++i)
+    {
+        auto &node = m_visualQueryNodes[i];
+        ImGui::PushID(static_cast<int>(node.id));
+
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin);
+
+        ImVec4 borderCol = node.isCTE ? ImVec4(0.95f, 0.70f, 0.25f, 0.85f) : ImVec4(0.30f, 0.75f, 1.0f, 0.85f);
+        ImVec4 headerCol = node.isCTE ? ImVec4(0.95f, 0.70f, 0.25f, 1.0f) : ImVec4(0.30f, 0.75f, 1.0f, 1.0f);
+
+        ImGui::PushStyleColor(ImGuiCol_Border, borderCol);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.5f);
+
+        // Calcul dynamique de la hauteur de la carte selon le nombre de colonnes
+        size_t colCount = 0;
+        const SavedQuery *cteRef = nullptr;
+        if (node.isCTE)
+        {
+            for (const auto &sq : m_savedQueries)
+            {
+                if (sq.name == node.datasetName)
+                {
+                    cteRef = &sq;
+                    colCount = sq.outputSchema.size();
+                    break;
+                }
+            }
+        }
+        else if (m_activeProject && m_activeProject->datasets().contains(node.datasetName))
+        {
+            colCount = m_activeProject->datasets().at(node.datasetName).columns().size();
+        }
+
+        float cardHeight = 82.0f + std::min<size_t>(colCount, 8) * 22.0f;
+        if (colCount == 0)
+            cardHeight = 95.0f;
+
+        std::string childId = "CteCard_" + std::to_string(node.id);
+        ImGui::BeginChild(childId.c_str(), ImVec2(cardWidth, cardHeight), true);
+
+        // --- En-tête de la carte : Badge CTE / Table + Alias + Actions ---
+        if (node.isCTE)
+            ImGui::TextColored(headerCol, "%s  CTE %d : %s", ICON_LC_FILE_TEXT, i + 1, node.datasetName.c_str());
+        else
+            ImGui::TextColored(headerCol, "%s  SOURCE %d : %s", ICON_LC_DATABASE, i + 1, node.datasetName.c_str());
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("  —  Alias :");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(130.0f);
+        std::array<char, 128> aliasBuf{};
+        snprintf(aliasBuf.data(), aliasBuf.size(), "%s", node.alias.c_str());
+        if (ImGui::InputText("##StackAlias", aliasBuf.data(), aliasBuf.size()))
+        {
+            node.alias = aliasBuf.data();
+        }
+
+        // Boutons d'action à droite de l'en-tête
+        ImGui::SameLine(cardWidth - 195.0f);
+        if (node.isCTE && cteRef != nullptr)
+        {
+            if (ImGui::SmallButton(ICON_LC_EYE))
+            {
+                m_pendingCtePreviewName = node.datasetName;
+            }
+            ImGui::SetItemTooltip("Aperçu graphique de la CTE");
+            ImGui::SameLine();
+
+            if (!hasConnection)
+                ImGui::BeginDisabled();
+            if (ImGui::SmallButton(ICON_LC_PLAY))
+            {
+                executeRawSqlQuery(cteRef->sql);
+            }
+            ImGui::SetItemTooltip("Exécuter cette CTE seule pour inspecter ses données");
+            if (!hasConnection)
+                ImGui::EndDisabled();
+            ImGui::SameLine();
+        }
+
+        if (ImGui::SmallButton(ICON_LC_ARROW_UP) && i > 0)
+            moveUpIdx = i;
+        ImGui::SetItemTooltip("Monter dans le pipeline");
+        ImGui::SameLine();
+
+        if (ImGui::SmallButton(ICON_LC_ARROW_DOWN) && i + 1 < static_cast<int>(m_visualQueryNodes.size()))
+            moveDownIdx = i;
+        ImGui::SetItemTooltip("Descendre dans le pipeline");
+        ImGui::SameLine();
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+        if (ImGui::SmallButton(ICON_LC_TRASH))
+            deleteIdx = i;
+        ImGui::PopStyleColor();
+        ImGui::SetItemTooltip("Retirer du pipeline");
+
+        ImGui::Separator();
+
+        // --- Liste des colonnes disponibles (cochables pour la Projection Finale) ---
+        ImGui::BeginChild(("Cols_" + std::to_string(node.id)).c_str(), ImVec2(-1.0f, -1.0f), false);
+
+        auto renderColumnItem = [&](size_t colIdx, const std::string &colName, const std::string &colType)
+        {
+            ImGui::PushID(static_cast<int>(colIdx));
+            bool isSelected = node.selectedColumns.contains(colIdx);
+            if (ImGui::Checkbox("##colChk", &isSelected))
+            {
+                std::string qualExpr = node.alias.empty() ? colName : (node.alias + "." + colName);
+                std::string defAlias = node.alias.empty() ? colName : (node.alias + "_" + colName);
+
+                if (isSelected)
+                {
+                    node.selectedColumns.insert(colIdx);
+                    auto it = std::find_if(m_projectionItems.begin(), m_projectionItems.end(),
+                                           [&qualExpr](const VisualProjectionItem &p)
+                                           { return !p.isCustomExpression && p.sqlExpression == qualExpr; });
+                    if (it == m_projectionItems.end())
+                    {
+                        uintptr_t nextId = m_projectionItems.size() + 70000;
+                        m_projectionItems.push_back(VisualProjectionItem{
+                            nextId, defAlias, qualExpr, false, false, node.id});
+                    }
+                    m_hasProjectionNode = true;
+                }
+                else
+                {
+                    node.selectedColumns.erase(colIdx);
+                    std::erase_if(m_projectionItems,
+                                  [&qualExpr](const VisualProjectionItem &p)
+                                  { return !p.isCustomExpression && p.sqlExpression == qualExpr; });
+                }
+            }
+            ImGui::SameLine();
+            ImGui::Text("  - %s", colName.c_str());
+            ImGui::SameLine(260.0f);
+            ImGui::TextDisabled("(%s)", colType.c_str());
+            ImGui::PopID();
+        };
+
+        if (node.isCTE && cteRef != nullptr)
+        {
+            for (size_t cIdx = 0; cIdx < cteRef->outputSchema.size(); ++cIdx)
+            {
+                renderColumnItem(cIdx, cteRef->outputSchema[cIdx].name, cteRef->outputSchema[cIdx].dataType);
+            }
+        }
+        else if (!node.isCTE && m_activeProject && m_activeProject->datasets().contains(node.datasetName))
+        {
+            const auto &ds = m_activeProject->datasets().at(node.datasetName);
+            for (const auto &[cIdx, colObj] : ds.columns())
+            {
+                renderColumnItem(cIdx, colObj.name(), colObj.type());
+            }
+        }
+        ImGui::EndChild();
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
+        // --- Connecteur vertical vers l'étape suivante ---
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin + (cardWidth * 0.5f) - 10.0f);
+        ImGui::TextColored(ImVec4(0.55f, 0.65f, 0.80f, 0.90f), "%s", ICON_LC_ARROW_DOWN);
+        ImGui::PopID();
+    }
+    // Traitement différé des réordonnancements / suppressions
+    if (moveUpIdx > 0)
+        std::swap(m_visualQueryNodes[moveUpIdx], m_visualQueryNodes[moveUpIdx - 1]);
+    if (moveDownIdx >= 0 && moveDownIdx + 1 < static_cast<int>(m_visualQueryNodes.size()))
+        std::swap(m_visualQueryNodes[moveDownIdx], m_visualQueryNodes[moveDownIdx + 1]);
+    if (deleteIdx >= 0)
+    {
+        uintptr_t removedId = m_visualQueryNodes[deleteIdx].id;
+        m_visualQueryNodes.erase(m_visualQueryNodes.begin() + deleteIdx);
+        std::erase_if(m_projectionItems, [removedId](const VisualProjectionItem &p)
+                      { return !p.isCustomExpression && p.sourceNodeId == removedId; });
+    }
+    // =========================================================================
+    // 2. BLOC PROJECTION FINALE (C1, C2, ...)
+    // =========================================================================
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.85f, 0.45f, 0.90f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.8f);
+    float projHeight = 90.0f + std::min<size_t>(m_projectionItems.size(), 10) * 26.0f;
+    ImGui::BeginChild("FinalProjectionCard", ImVec2(cardWidth, projHeight), true);
+    ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s  PROJECTION FINALE (%d colonne(s) exposée(s))",
+                       ICON_LC_LAYERS, static_cast<int>(m_projectionItems.size()));
+    ImGui::Separator();
+    if (m_projectionItems.empty())
+    {
+        ImGui::TextDisabled("   Cochez des colonnes dans les CTE ci-dessus pour alimenter C1, C2...");
+    }
+    else
+    {
+        int projRemoveIdx = -1;
+        for (int pIdx = 0; pIdx < static_cast<int>(m_projectionItems.size()); ++pIdx)
+        {
+            auto &item = m_projectionItems[pIdx];
+            ImGui::PushID(pIdx + 50000);
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "C%d", pIdx + 1);
+            ImGui::SameLine(50.0f);
+            ImGui::Text("%s", item.sqlExpression.c_str());
+            ImGui::SameLine(340.0f);
+            ImGui::TextDisabled("AS");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(180.0f);
+            std::array<char, 128> outAliasBuf{};
+            snprintf(outAliasBuf.data(), outAliasBuf.size(), "%s", item.alias.c_str());
+            if (ImGui::InputText("##ProjOutAlias", outAliasBuf.data(), outAliasBuf.size()))
+            {
+                item.alias = outAliasBuf.data();
+            }
+            ImGui::SameLine(cardWidth - 45.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+            if (ImGui::SmallButton(ICON_LC_TRASH))
+                projRemoveIdx = pIdx;
+            ImGui::PopStyleColor();
+            ImGui::PopID();
+        }
+        if (projRemoveIdx >= 0)
+        {
+            m_projectionItems.erase(m_projectionItems.begin() + projRemoveIdx);
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    ImGui::Spacing();
+    ImGui::EndChild();
+    // Ouverture différée de l'aperçu graphique si demandée depuis une carte CTE
+    if (!m_pendingCtePreviewName.empty())
+    {
+        std::string target = m_pendingCtePreviewName;
+        m_pendingCtePreviewName.clear();
+        openCtePreviewModal(target);
     }
 }
