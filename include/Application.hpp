@@ -488,5 +488,8 @@ private:
 
     std::string m_pendingCtePreviewName = "";
 
+    bool m_cteStackHorizontal = true;
+
+
 
 };
