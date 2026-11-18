@@ -19,6 +19,7 @@
 #include <atomic>
 #include <mutex>
 #include <deque>
+#include <unordered_set>
 
 
 
@@ -238,6 +239,22 @@ private:
     void openCtePreviewModal(const std::string &cteQueryName);
     void renderCtePreviewModal();
     void renderCteStackEditor();
+
+    struct CteChainStep
+    {
+        std::string queryName;
+        std::string alias;
+        bool isRootNode = false;
+        int depth = 0;
+        const VisualQueryNode *canvasNode = nullptr;
+    };
+
+    void collectCteDependenciesRecursive(
+        const std::string &cteName,
+        std::unordered_set<std::string> &visited,
+        std::vector<CteChainStep> &outSteps,
+        int currentDepth = 0) const;
+
 
 
     // =========================================================================
