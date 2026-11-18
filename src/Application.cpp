@@ -7488,23 +7488,26 @@ void Application::renderCtePreviewModal()
             }
         }
 
-        // Dimensions compactes
         float availW = ImGui::GetContentRegionAvail().x;
-        float availH = ImGui::GetContentRegionAvail().y;
-
         float cardWidth = m_cteStackHorizontal ? 245.0f : std::min(680.0f, availW - 20.0f);
         float leftMargin = m_cteStackHorizontal ? 8.0f : std::max(0.0f, (availW - cardWidth) * 0.5f);
-        float fixedHorizCardHeight = std::max(240.0f, availH - 32.0f);
+        float startTopY = ImGui::GetCursorPosY();
 
         // =========================================================================
-        // 2. RENDU DE L'EMPILEMENT COMPACT (HORIZONTAL OU VERTICAL)
+        // 2. RENDU DE L'EMPILEMENT COMPACT (HAUTEUR AJUSTÉE AU NOMBRE DE CHAMPS)
         // =========================================================================
         for (int stepIdx = 0; stepIdx < int(fullPipeline.size()); ++stepIdx)
         {
             const auto &step = fullPipeline[stepIdx];
             bool isCteStep = (step.canvasNode == nullptr || step.canvasNode->isCTE);
 
-            if (!m_cteStackHorizontal || stepIdx == 0)
+            if (m_cteStackHorizontal)
+            {
+                ImGui::SetCursorPosY(startTopY);
+                if (stepIdx == 0)
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin);
+            }
+            else
             {
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin);
             }
@@ -7513,10 +7516,6 @@ void Application::renderCtePreviewModal()
                                    ? (step.isRootNode ? ImVec4(0.95f, 0.70f, 0.25f, 0.90f) : ImVec4(0.75f, 0.55f, 0.25f, 0.65f))
                                    : ImVec4(0.30f, 0.75f, 1.0f, 0.85f);
             ImVec4 headerCol = isCteStep ? ImVec4(0.95f, 0.70f, 0.25f, 1.0f) : ImVec4(0.30f, 0.75f, 1.0f, 1.0f);
-
-            ImGui::PushStyleColor(ImGuiCol_Border, borderCol);
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, step.isRootNode ? 1.8f : 1.2f);
 
             const SavedQuery *cteRef = nullptr;
             size_t colCount = 0;
@@ -7537,9 +7536,16 @@ void Application::renderCtePreviewModal()
                 colCount = m_activeProject->datasets().at(step.queryName).columns().size();
             }
 
-            float cardHeight = m_cteStackHorizontal
-                                   ? fixedHorizCardHeight
-                                   : (colCount == 0 ? 90.0f : (76.0f + std::min<size_t>(colCount, 10) * 22.0f));
+            // Calcul dynamique de la hauteur selon le nombre exact de colonnes
+            size_t visibleCols = std::min<size_t>(colCount, 14);
+            float rowStep = (step.isRootNode || !isCteStep) ? 24.0f : 20.0f;
+            float cardHeight = (colCount == 0) ? 85.0f : (72.0f + float(visibleCols) * rowStep);
+
+            ImGui::BeginGroup();
+
+            ImGui::PushStyleColor(ImGuiCol_Border, borderCol);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, step.isRootNode ? 1.8f : 1.2f);
 
             std::string cardChildId = "PipelineStepCard_" + std::to_string(stepIdx);
             ImGui::BeginChild(cardChildId.c_str(), ImVec2(cardWidth, cardHeight), true);
@@ -7587,7 +7593,7 @@ void Application::renderCtePreviewModal()
             ImGui::TextDisabled("Alias : %s", step.alias.c_str());
             ImGui::Separator();
 
-            // --- Liste directe des colonnes (sans BeginChild imbriqué, types affichés au survol) ---
+            // --- Liste des colonnes ---
             if (isCteStep && cteRef != nullptr)
             {
                 for (size_t cIdx = 0; cIdx < cteRef->outputSchema.size(); ++cIdx)
@@ -7675,14 +7681,14 @@ void Application::renderCtePreviewModal()
             ImGui::EndChild(); // Fin de PipelineStepCard
             ImGui::PopStyleVar(2);
             ImGui::PopStyleColor();
+            ImGui::EndGroup();
             // Connecteur vers l'étape suivante
             if (m_cteStackHorizontal)
             {
-                ImGui::SameLine(0.0f, 6.0f);
-                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (cardHeight * 0.5f) - 10.0f);
+                ImGui::SameLine(0.0f, 8.0f);
+                ImGui::SetCursorPosY(startTopY + (cardHeight * 0.5f) - 10.0f);
                 ImGui::TextColored(ImVec4(0.55f, 0.65f, 0.80f, 0.90f), "%s", ICON_LC_CHEVRON_RIGHT);
-                ImGui::SameLine(0.0f, 6.0f);
-                ImGui::SetCursorPosY(ImGui::GetCursorPosY() - (cardHeight * 0.5f) + 10.0f);
+                ImGui::SameLine(0.0f, 8.0f);
             }
             else
             {
@@ -7691,16 +7697,20 @@ void Application::renderCtePreviewModal()
             }
         }
         // =========================================================================
-        // 3. BLOC PROJECTION FINALE COMPACT (C1, C2, ...)
+        // 3. BLOC PROJECTION FINALE COMPACT (HAUTEUR AJUSTÉE AUX COLONNES C1..Cn)
         // =========================================================================
         float projWidth = m_cteStackHorizontal ? 310.0f : cardWidth;
-        float projHeight = m_cteStackHorizontal
-                               ? fixedHorizCardHeight
-                               : (90.0f + std::min<size_t>(m_projectionItems.size(), 10) * 26.0f);
-        if (!m_cteStackHorizontal)
+        size_t visibleProjs = std::min<size_t>(m_projectionItems.size(), 14);
+        float projHeight = m_projectionItems.empty() ? 85.0f : (68.0f + float(visibleProjs) * 26.0f);
+        if (m_cteStackHorizontal)
+        {
+            ImGui::SetCursorPosY(startTopY);
+        }
+        else
         {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin);
         }
+        ImGui::BeginGroup();
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.85f, 0.45f, 0.90f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.8f);
@@ -7761,6 +7771,7 @@ void Application::renderCtePreviewModal()
         ImGui::EndChild();
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor();
+        ImGui::EndGroup();
         if (m_cteStackHorizontal)
         {
             ImGui::SameLine(0.0f, 10.0f);
@@ -7778,4 +7789,3 @@ void Application::renderCtePreviewModal()
             openCtePreviewModal(target);
         }
     }
-    
