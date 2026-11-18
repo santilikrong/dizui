@@ -7410,7 +7410,10 @@ void Application::renderCtePreviewModal()
 
         // Zone défilante principale
         ImGuiWindowFlags scrollFlags = m_cteStackHorizontal ? ImGuiWindowFlags_HorizontalScrollbar : ImGuiWindowFlags_None;
-        ImGui::BeginChild("CteStackScrollRegion", ImVec2(-1.0f, -1.0f), false, scrollFlags);
+        // Identifiant distinct par orientation pour éviter tout conflit de drapeaux dans Dear ImGui
+        const char *scrollChildName = m_cteStackHorizontal ? "CteStackScrollRegion_H" : "CteStackScrollRegion_V";
+        ImGuiWindowFlags scrollFlags = m_cteStackHorizontal ? ImGuiWindowFlags_HorizontalScrollbar : ImGuiWindowFlags_None;
+        ImGui::BeginChild(scrollChildName, ImVec2(-1.0f, -1.0f), false, scrollFlags);
 
         // Réception Drag & Drop directe
         if (ImGui::BeginDragDropTarget())
