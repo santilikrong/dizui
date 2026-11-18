@@ -235,6 +235,10 @@ private:
     void renderQueryTextEditor();
     void executeRawSqlQuery(const std::string &sqlText);
 
+    void openCtePreviewModal(const std::string &cteQueryName);
+    void renderCtePreviewModal();
+
+
     // =========================================================================
     // 3. MÉTHODES MÉTIER, COMPILATION ET PERSISTANCE
     // =========================================================================
@@ -452,5 +456,19 @@ private:
     std::string m_sqlPendingInsertion = "";
     int m_sqlReplaceStartPos = 0;
     int m_sqlReplaceEndPos = 0;
+
+    // Aperçu graphique en avant-plan d'une CTE (Drill-down)
+    ed::EditorContext *m_ctePreviewContext = nullptr;
+    bool m_showCtePreviewModal = false;
+    bool m_needsCtePreviewCentering = false;
+    std::string m_previewCteName = "";
+    std::string m_previewCteSql = "";
+    std::vector<VisualQueryNode> m_previewCteNodes;
+    std::vector<VisualQueryLink> m_previewCteLinks;
+    std::vector<VisualQueryPredicate> m_previewCtePredicates;
+    std::vector<VisualProjectionItem> m_previewCteProjections;
+
+    std::string m_pendingCtePreviewName = "";
+
 
 };

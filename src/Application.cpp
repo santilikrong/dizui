@@ -540,6 +540,12 @@ Application::~Application()
         ed::DestroyEditor(m_queryContext);
     g_coutRedirector.reset();
     g_cerrRedirector.reset();
+
+    if (m_ctePreviewContext)
+    {
+        ed::DestroyEditor(m_ctePreviewContext);
+        m_ctePreviewContext = nullptr;
+    }
 }
 
 void Application::run()
@@ -2783,6 +2789,7 @@ void Application::renderGlobalModals()
     renderConnectionModals();
     renderTaskManagementModals();
     renderQueryInspectAndDeleteModals();
+    renderCtePreviewModal();
 }
 
 void Application::renderReverseEngineeringModal()
@@ -3962,10 +3969,18 @@ void Application::renderQueryCanvas(float canvas_height)
     }
 
     // Fermeture hermétique et étanche du canevas
-    ed::End();
-    ed::SetCurrentEditor(nullptr);
+ ed::End();
+ ed::SetCurrentEditor(nullptr);
 
-    ImGui::EndChild();
+ if (!m_pendingCtePreviewName.empty())
+ {
+     std::string target = m_pendingCtePreviewName;
+     m_pendingCtePreviewName.clear();
+     openCtePreviewModal(target);
+ }
+
+ ImGui::EndChild();
+
 }
 
 void Application::handleCanvasInteraction()
@@ -4029,11 +4044,21 @@ void Application::renderCanvasDatasetNodes()
         if (visualNode.isCTE)
         {
             ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.25f, 1.0f), "%s  CTE: %s", ICON_LC_FILE_TEXT, visualNode.datasetName.c_str());
+            ImGui::SameLine(250.0f);
+            ImGui::PushID(("preview_cte_" + std::to_string(visualNode.id)).c_str());
+            if (ImGui::SmallButton(ICON_LC_EYE))
+            {
+                m_pendingCtePreviewName = visualNode.datasetName;
+            }
+
+            ImGui::SetItemTooltip("Visualiser le graphe source de la CTE '%s'", visualNode.datasetName.c_str());
+            ImGui::PopID();
         }
         else
         {
             ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Table: %s", ICON_LC_DATABASE, visualNode.datasetName.c_str());
         }
+
 
         ImGui::TextDisabled("  Alias :");
         ImGui::SameLine();
@@ -6935,5 +6960,245 @@ void Application::renderQueryTextEditor()
                 ImGui::End();
             }
         }
+    }
+}
+
+void Application::openCtePreviewModal(const std::string &cteQueryName)
+{
+    m_previewCteName = cteQueryName;
+    m_previewCteSql.clear();
+    m_previewCteNodes.clear();
+    m_previewCteLinks.clear();
+    m_previewCtePredicates.clear();
+    m_previewCteProjections.clear();
+
+    if (!m_ctePreviewContext)
+    {
+        ed::Config cfg;
+        cfg.SettingsFile = nullptr;
+        m_ctePreviewContext = ed::CreateEditor(&cfg);
+    }
+
+    auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
+                           [&cteQueryName](const SavedQuery &q) { return q.name == cteQueryName; });
+
+    if (it != m_savedQueries.end())
+    {
+        m_previewCteSql = it->sql;
+
+        // 1. Sauvegarde temporaire de l'état du canevas principal
+        auto backupNodes = m_visualQueryNodes;
+        auto backupLinks = m_visualQueryLinks;
+        auto backupPreds = m_visualQueryPredicates;
+        auto backupProjs = m_projectionItems;
+        bool backupHasProj = m_hasProjectionNode;
+        bool backupCentering = m_needsQueryCentering;
+
+        // 2. Chargement de la CTE via votre désérialiseur existant
+        ed::SetCurrentEditor(m_ctePreviewContext);
+        loadQueryIntoVisualDesigner(*it);
+        ed::SetCurrentEditor(nullptr);
+
+
+        // 3. Copie vers les vecteurs d'aperçu en avant-plan
+        m_previewCteNodes = m_visualQueryNodes;
+        m_previewCteLinks = m_visualQueryLinks;
+        m_previewCtePredicates = m_visualQueryPredicates;
+        m_previewCteProjections = m_projectionItems;
+
+        for (auto &n : m_previewCteNodes)
+            n.needsPositionInitialization = true;
+        for (auto &p : m_previewCtePredicates)
+            p.needsPositionInitialization = true;
+
+        // 4. Restauration immédiate du canevas principal
+        m_visualQueryNodes = std::move(backupNodes);
+        m_visualQueryLinks = std::move(backupLinks);
+        m_visualQueryPredicates = std::move(backupPreds);
+        m_projectionItems = std::move(backupProjs);
+        m_hasProjectionNode = backupHasProj;
+        m_needsQueryCentering = backupCentering;
+    }
+
+    m_needsCtePreviewCentering = true;
+    m_showCtePreviewModal = true;
+}
+
+
+void Application::renderCtePreviewModal()
+{
+    if (m_showCtePreviewModal)
+    {
+        ImGui::OpenPopup("Aperçu Graphique de la CTE");
+        m_showCtePreviewModal = false; // Ouvre la popup une fois ; BeginPopupModal reste ouvert tant qu'on n'appelle pas CloseCurrentPopup()
+    }
+
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(980.0f, 640.0f), ImGuiCond_Appearing);
+
+    bool isOpen = true;
+    if (ImGui::BeginPopupModal("Aperçu Graphique de la CTE", &isOpen))
+    {
+        if (!isOpen)
+        {
+            ImGui::CloseCurrentPopup();
+        }
+        // Barre d'en-tête avec titre et bouton Fermer
+        ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.25f, 1.0f), "%s  Sous-requête CTE : %s", ICON_LC_FILE_TEXT, m_previewCteName.c_str());
+
+        float rightBtnWidth = 270.0f;
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - rightBtnWidth + 16.0f);
+        if (ImGui::Button((std::string(ICON_LC_FOLDER_OPEN) + "  Ouvrir pour éditer").c_str(), ImVec2(160.0f, 26.0f)))
+        {
+            auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
+                                   [this](const SavedQuery &q)
+                                   { return q.name == m_previewCteName; });
+            if (it != m_savedQueries.end())
+            {
+                loadQueryIntoVisualDesigner(*it);
+            }
+            m_showCtePreviewModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.25f, 0.25f, 0.90f));
+        if (ImGui::Button("Fermer", ImVec2(95.0f, 26.0f)))
+        {
+            m_showCtePreviewModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor();
+
+        ImGui::Separator();
+
+        if (m_previewCteNodes.empty())
+        {
+            ImGui::TextDisabled("Cette requête ne possède pas de graphe visuel enregistré. Aperçu SQL :");
+            std::string sqlBuf = m_previewCteSql;
+            ImGui::InputTextMultiline("##CtePreviewSqlOnly", sqlBuf.data(), sqlBuf.size() + 1, ImVec2(-1.0f, -1.0f), ImGuiInputTextFlags_ReadOnly);
+        }
+        else
+        {
+            // Canevas isolé en avant-plan
+            ImGui::BeginChild("CtePreviewCanvasChild", ImVec2(-1.0f, -1.0f), true,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+            ed::SetCurrentEditor(m_ctePreviewContext);
+            ed::Begin("CtePreviewGraph");
+
+            // 1. Rendu des nœuds Sources (Tables ou sous-CTE)
+            for (auto &node : m_previewCteNodes)
+            {
+                if (node.needsPositionInitialization)
+                {
+                    node.needsPositionInitialization = false;
+                    ed::SetNodePosition(node.id, node.position);
+                }
+
+                if (node.isCTE)
+                    ed::PushStyleColor(ed::StyleColor_NodeBorder, ImVec4(0.95f, 0.70f, 0.25f, 0.90f));
+
+                ed::BeginNode(node.id);
+                ImGui::BeginGroup();
+                if (node.isCTE)
+                    ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.25f, 1.0f), "%s  CTE: %s", ICON_LC_FILE_TEXT, node.datasetName.c_str());
+                else
+                    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Table: %s", ICON_LC_DATABASE, node.datasetName.c_str());
+
+                ImGui::TextDisabled("  Alias : %s", node.alias.c_str());
+                ImGui::Separator();
+
+                auto drawPreviewCol = [&](size_t idx, const std::string &cName, const std::string &cType)
+                {
+                    ed::BeginPin((node.id * 1000) + idx, ed::PinKind::Input);
+                    bool checked = node.selectedColumns.contains(idx);
+                    ImGui::TextColored(checked ? ImVec4(0.35f, 0.85f, 0.45f, 1.0f) : ImVec4(0.55f, 0.58f, 0.65f, 1.0f),
+                                       "%s %s", checked ? "[x]" : "[ ]", cName.c_str());
+                    ed::EndPin();
+
+                    ImGui::SameLine(170.0f);
+                    ImGui::TextDisabled(": %s", cType.c_str());
+
+                    ImGui::SameLine(275.0f);
+                    ed::BeginPin((node.id * 1000) + idx + 500, ed::PinKind::Output);
+                    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 0.5f), ICON_LC_CHEVRON_RIGHT);
+                    ed::EndPin();
+                };
+
+                if (node.isCTE)
+                {
+                    for (const auto &sq : m_savedQueries)
+                    {
+                        if (sq.name == node.datasetName)
+                        {
+                            for (size_t idx = 0; idx < sq.outputSchema.size(); ++idx)
+                                drawPreviewCol(idx, sq.outputSchema[idx].name, sq.outputSchema[idx].dataType);
+                            break;
+                        }
+                    }
+                }
+                else if (m_activeProject && m_activeProject->datasets().contains(node.datasetName))
+                {
+                    const auto &ds = m_activeProject->datasets().at(node.datasetName);
+                    for (const auto &[idx, colObj] : ds.columns())
+                        drawPreviewCol(idx, colObj.name(), colObj.type());
+                }
+                ImGui::EndGroup();
+                ed::EndNode();
+                if (node.isCTE)
+                    ed::PopStyleColor();
+            }
+            // 2. Rendu des nœuds Filtres WHERE
+            for (auto &pred : m_previewCtePredicates)
+            {
+                if (pred.needsPositionInitialization)
+                {
+                    pred.needsPositionInitialization = false;
+                    ed::SetNodePosition(pred.id, pred.position);
+                }
+                ed::BeginNode(pred.id);
+                ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f), "%s  Filtre WHERE", ICON_LC_FILTER);
+                uintptr_t predInPin = pred.id + 500000;
+                ed::BeginPin(predInPin, ed::PinKind::Input);
+                ImGui::Text("%s  '%s'", pred.targetColumn.c_str(), pred.value.c_str());
+                ed::EndPin();
+                ed::EndNode();
+
+                if (pred.connectedSrcPinId != 0)
+                {
+                    ed::Link(pred.id + 80000, pred.connectedSrcPinId, predInPin, ImVec4(1.0f, 1.0f, 1.0f, 0.8f), 2.0f);
+                }
+            }
+
+            // 3. Rendu des Jointures
+            for (const auto &link : m_previewCteLinks)
+            {
+                ed::Link(link.id, link.startPinId, link.endPinId, ImVec4(1.0f, 0.8f, 0.2f, 0.9f), 2.5f);
+            }
+
+            // 4. Rendu du nœud Projection SELECT
+            if (!m_previewCteProjections.empty())
+            {
+                ed::BeginNode(999999);
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s  Projection SELECT", ICON_LC_LAYERS);
+                ImGui::Separator();
+                for (const auto &proj : m_previewCteProjections)
+                {
+                    ImGui::Text("%s", proj.sqlExpression.c_str());
+                }
+                ed::EndNode();
+            }
+
+            if (m_needsCtePreviewCentering)
+            {
+                ed::NavigateToContent(0.0f);
+                m_needsCtePreviewCentering = false;
+            }
+            ed::End();
+            ed::SetCurrentEditor(nullptr);
+            ImGui::EndChild();
+        }
+        ImGui::EndPopup();
     }
 }
