@@ -129,7 +129,7 @@ Application::Application()
         createNewProject("Nouveau_Projet");
     }
 
-
+   
     applyTheme(AppTheme::Nord); 
 }
 
@@ -3112,7 +3112,13 @@ void Application::renderStatusBar()
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - checkWidth);
             }
 
-            ImGui::Checkbox((std::string(ICON_LC_TERMINAL) + " Console").c_str(), &m_showConsolePanel);
+            if (ImGui::Checkbox((std::string(ICON_LC_TERMINAL) + " Console").c_str(), &m_showConsolePanel))
+            {
+                if (m_showConsolePanel)
+                {
+                    ImGui::SetWindowFocus("Console & Journaux d'Exécution");
+                }
+            }
 
             ImGui::EndMenuBar();
         }
@@ -5676,9 +5682,21 @@ void Application::renderConsolePanel()
     if (!m_showConsolePanel)
         return;
 
+    if (m_consoleDockId != 0)
+    {
+        ImGui::SetNextWindowDockID(m_consoleDockId, ImGuiCond_FirstUseEver);
+    }
+
     ImGui::SetNextWindowSize(ImVec2(800.0f, 180.0f), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Console & Journaux d'Exécution", &m_showConsolePanel))
     {
+        // Mémorise en continu le DockID du panneau inférieur tant qu'il est docké
+        ImGuiID currentDockId = ImGui::GetWindowDockID();
+        if (currentDockId != 0)
+        {
+            m_consoleDockId = currentDockId;
+        }
+
         // Barre d'outils supérieure de la console
         if (ImGui::SmallButton((std::string(ICON_LC_TRASH) + "  Effacer").c_str()))
         {

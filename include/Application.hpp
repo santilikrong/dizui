@@ -415,6 +415,7 @@ private:
     bool m_consoleAutoScroll = true;
     char m_consoleFilterBuf[128] = "";
     std::mutex m_consoleMutex;
+    ImGuiID m_consoleDockId = 0;
     std::deque<ConsoleLogEntry> m_consoleLogs;
 
     bool m_showQueryResultsPanel = true;
