@@ -13,11 +13,80 @@
 #include <cppsqlx/sqljoinexpressionbuilder.hpp>
 #include <cppsqlx/selectquery.hpp>
 #include <cppsqlx/statement.hpp>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
 
 using namespace cppsqlx::literals;
 
+namespace
+{
+    class GuiStreamRedirector : public std::streambuf
+    {
+    public:
+        GuiStreamRedirector(std::ostream &stream, std::function<void(const std::string &)> callback)
+            : m_stream(stream), m_oldBuf(stream.rdbuf()), m_callback(std::move(callback))
+        {
+            m_stream.rdbuf(this);
+        }
+
+        ~GuiStreamRedirector() override
+        {
+            if (m_oldBuf)
+                m_stream.rdbuf(m_oldBuf);
+        }
+
+    protected:
+        int overflow(int c) override
+        {
+            if (c != EOF)
+            {
+                char ch = static_cast<char>(c);
+                if (m_oldBuf)
+                    m_oldBuf->sputc(ch);
+
+                if (ch == '\n')
+                {
+                    if (!m_lineBuffer.empty())
+                    {
+                        m_callback(m_lineBuffer);
+                        m_lineBuffer.clear();
+                    }
+                }
+                else if (ch != '\r')
+                {
+                    m_lineBuffer.push_back(ch);
+                }
+            }
+            return c;
+        }
+
+    private:
+        std::ostream &m_stream;
+        std::streambuf *m_oldBuf;
+        std::function<void(const std::string &)> m_callback;
+        std::string m_lineBuffer;
+    };
+
+    std::unique_ptr<GuiStreamRedirector> g_coutRedirector;
+    std::unique_ptr<GuiStreamRedirector> g_cerrRedirector;
+}
+
+
 Application::Application()
 {
+
+    g_coutRedirector = std::make_unique<GuiStreamRedirector>(std::cout, [this](const std::string &line) {
+        LogLevel lvl = LogLevel::Info;
+        if (line.find("succès") != std::string::npos || line.find("OK") != std::string::npos)
+            lvl = LogLevel::Success;
+        addConsoleLog(line, lvl);
+    });
+
+    g_cerrRedirector = std::make_unique<GuiStreamRedirector>(std::cerr, [this](const std::string &line) {
+        addConsoleLog(line, LogLevel::Error);
+    });
+
     m_windowManager = std::make_unique<WindowManager>(2200, 1200, "dizui - Linux C++20 Workspace");
     m_renderEngine = std::make_unique<RenderEngine>(m_windowManager->getNativeWindow());
 
@@ -61,15 +130,18 @@ Application::Application()
     }
 
 
-    applyTheme(AppTheme::DarkModern); 
+    applyTheme(AppTheme::Nord); 
 }
 
 Application::~Application()
 {
+
     if (m_workflowContext)
         ed::DestroyEditor(m_workflowContext);
     if (m_queryContext)
         ed::DestroyEditor(m_queryContext);
+    g_coutRedirector.reset();
+    g_cerrRedirector.reset();
 }
 
 void Application::run()
@@ -1072,12 +1144,90 @@ void Application::executeVisualQuery(const std::string &sql)
             }
 
         }
+
+        m_showQueryResultsPanel = true;
+        m_focusQueryResultsTab = true;
     }
     catch (const std::exception &e)
     {
         m_executionError = std::string("Erreur SQL : ") + e.what();
     }
 }
+
+void Application::renderQueryResultsPanel()
+{
+    if (!m_showQueryResultsPanel)
+        return;
+
+    // Rattache automatiquement l'onglet au même dock que la console
+    if (ImGuiWindow *consoleWin = ImGui::FindWindowByName("Console & Journaux d'Exécution"))
+    {
+        if (consoleWin->DockId != 0)
+        {
+            ImGui::SetNextWindowDockID(consoleWin->DockId, ImGuiCond_FirstUseEver);
+        }
+    }
+
+    if (m_focusQueryResultsTab)
+    {
+        ImGui::SetNextWindowFocus();
+        m_focusQueryResultsTab = false;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(800.0f, 200.0f), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Résultat du Graphe Visuel", nullptr))
+    {
+        if (!m_executionError.empty())
+        {
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "%s  Erreur SQL : %s", ICON_LC_ALERT_TRIANGLE, m_executionError.c_str());
+        }
+        else if (m_queryResultHeaders.empty() || m_queryResultRows.empty())
+        {
+            ImGui::TextDisabled("Aucun résultat d'exécution disponible. Cliquez sur Play pour lancer la requête.");
+        }
+        else
+        {
+            ImGui::TextDisabled("%d ligne(s) retournée(s)", static_cast<int>(m_queryResultRows.size()));
+            ImGui::Separator();
+
+            ImGuiTableFlags tableFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                         ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollX |
+                                         ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit;
+
+            if (ImGui::BeginTable("VisualQueryResultsTable", static_cast<int>(m_queryResultHeaders.size()), tableFlags))
+            {
+                for (const auto &header : m_queryResultHeaders)
+                {
+                    ImGui::TableSetupColumn(header.c_str());
+                }
+                ImGui::TableHeadersRow();
+
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(m_queryResultRows.size()));
+                while (clipper.Step())
+                {
+                    for (int rowIdx = clipper.DisplayStart; rowIdx < clipper.DisplayEnd; ++rowIdx)
+                    {
+                        ImGui::TableNextRow();
+                        const auto &row = m_queryResultRows[rowIdx];
+                        for (size_t colIdx = 0; colIdx < m_queryResultHeaders.size(); ++colIdx)
+                        {
+                            ImGui::TableSetColumnIndex(static_cast<int>(colIdx));
+                            if (colIdx < row.size())
+                                ImGui::TextUnformatted(row[colIdx].c_str());
+                            else
+                                ImGui::TextDisabled("NULL");
+                        }
+                    }
+                }
+                clipper.End();
+                ImGui::EndTable();
+            }
+        }
+    }
+    ImGui::End();
+}
+
 
 void Application::launchWorkflowExecutionAsync(const std::string &logicalConnName, const std::string &envContext)
 {
@@ -1165,6 +1315,8 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
 
 void Application::renderUI()
 {
+
+    renderStatusBar();
     ImGuiViewport *viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -1179,6 +1331,11 @@ void Application::renderUI()
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::Begin("DizuiWorkspaceHost", nullptr, host_window_flags);
     ImGui::PopStyleVar(3);
+
+    float statusBarHeight = 28.0f;
+    float mainAreaHeight = ImGui::GetContentRegionAvail().y - statusBarHeight;
+    if (mainAreaHeight < 100.0f)
+        mainAreaHeight = 100.0f;
 
     ImGuiID dockspace_id = ImGui::GetID("DizuiMainDockSpace");
 
@@ -1210,9 +1367,17 @@ void Application::renderUI()
         if (main_node)
             main_node->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
 
+        // Découpe 25% de la hauteur en bas de l'espace de travail pour la console et les résultats SQL
+        ImGuiID dock_bottom_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Down, 0.25f, nullptr, &dock_main_id);
+
         ImGui::DockBuilderDockWindow("Outils", dock_left_id);
         ImGui::DockBuilderDockWindow("Panneau de Contrôle", dock_center_id);
         ImGui::DockBuilderDockWindow("Espace de Travail (Canevas)", dock_main_id);
+
+        // Regroupement des deux panneaux sous forme d'onglets dans le dock du bas
+        ImGui::DockBuilderDockWindow("Console & Journaux d'Exécution", dock_bottom_id);
+        ImGui::DockBuilderDockWindow("Résultat du Graphe Visuel", dock_bottom_id);
+
 
         ImGui::DockBuilderFinish(dockspace_id);
     }
@@ -1371,6 +1536,7 @@ void Application::renderUI()
     // DES SOUS-SYSTÈMES GRAPHIOQUES
     renderLeftSidebar();
     renderMainContentZone();
+    renderConsolePanel();renderQueryResultsPanel();
     renderGlobalModals();
 }
 
@@ -2052,11 +2218,21 @@ void Application::renderMainContentZone()
     {
         if (ImGui::BeginTabItem((std::string(ICON_LC_ACTIVITY) + "  Workflow Designer").c_str()))
         {
+            if (ImGui::IsItemActivated())
+            {
+                m_showConsolePanel = true;
+                ImGui::SetWindowFocus("Console & Journaux d'Exécution");
+            }
             renderWorkflowEditor();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem((std::string(ICON_LC_SEARCH) + "  Query Visual Designer").c_str()))
         {
+            if (ImGui::IsItemActivated())
+            {
+                m_showQueryResultsPanel = true;
+                m_focusQueryResultsTab = true;
+            }
             renderQueryEditor();
             ImGui::EndTabItem();
         }
@@ -2068,6 +2244,7 @@ void Application::renderMainContentZone()
     }
     ImGui::End();
 }
+
 
 void Application::renderGlobalModals()
 {
@@ -2778,10 +2955,40 @@ void Application::renderRenameModals()
 
 void Application::renderStatusBar()
 {
-    ImGui::Separator();
-    ImGui::TextDisabled("  %s Outil connecté : %s | Environnement : %s | Graphe : %d nœuds actifs",
-                        ICON_LC_ACTIVITY, m_selectedGateway.c_str(), m_selectedContext.c_str(), (int)m_visualQueryNodes.size());
+    ImGuiViewport *viewport = ImGui::GetMainViewport();
+    float barHeight = ImGui::GetFrameHeight() + 8.0f;
+
+    ImGuiWindowFlags barFlags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_MenuBar;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    if (ImGui::BeginViewportSideBar("##DizuiStatusBar", viewport, ImGuiDir_Down, barHeight, barFlags))
+    {
+        if (ImGui::BeginMenuBar())
+        {
+            ImGui::TextDisabled("%s Outil connecté : %s | Environnement : %s | Graphe : %d nœuds actifs",
+                                ICON_LC_ACTIVITY,
+                                m_selectedGateway.empty() ? "Aucun" : m_selectedGateway.c_str(),
+                                m_selectedContext.empty() ? "Aucun" : m_selectedContext.c_str(),
+                                static_cast<int>(m_visualQueryNodes.size()));
+
+            // Alignement de la case à cocher Console tout à droite
+            float checkWidth = 115.0f;
+            float avail = ImGui::GetContentRegionAvail().x;
+            if (avail > checkWidth)
+            {
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - checkWidth);
+            }
+
+            ImGui::Checkbox((std::string(ICON_LC_TERMINAL) + " Console").c_str(), &m_showConsolePanel);
+
+            ImGui::EndMenuBar();
+        }
+        ImGui::End();
+    }
+    ImGui::PopStyleVar();
 }
+
+
 
 void Application::renderQueryEditor()
 {
@@ -2885,8 +3092,16 @@ void Application::renderQueryEditor()
     ImGui::EndChild();
     ImGui::Separator();
 
-    // [ Le reste de renderQueryEditor reste parfaitement identique ]
+    // Prend 100 % de la hauteur disponible restante
+    // Réaffectation directe de la variable existante pour occuper 100 % de la hauteur
+    canvas_height = ImGui::GetContentRegionAvail().y;
+    if (canvas_height < 100.0f)
+        canvas_height = 100.0f;
+
     renderQueryCanvas(canvas_height);
+
+    // [ Le reste de renderQueryEditor reste parfaitement identique ]
+    //renderQueryCanvas(canvas_height);
 
     // 3. Zone Intermédiaire : Le Splitter Horizontal Rédimensionnable
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 2.0f));
@@ -2903,6 +3118,7 @@ void Application::renderQueryEditor()
     ImGui::PopStyleVar();
 
     // 4. Zone B : La table basse de résultats PostgreSQL
+    /*
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::TextDisabled("%s  RÉSULTAT DU GRAPHE VISUEL", ICON_LC_ACTIVITY);
     ImGui::Separator();
@@ -2911,6 +3127,7 @@ void Application::renderQueryEditor()
     renderQueryResultTable(bottom_zone_height);
 
     ImGui::PopStyleVar(1);
+    */
 
     // 5. Zone C : Les Popups modaux d'UI (Jointures, Filtres WHERE)
     renderQueryModals();
@@ -3239,6 +3456,7 @@ void Application::handleCanvasInteraction()
         }
     }
 }
+
 
 
 void Application::renderCanvasDatasetNodes()
@@ -4780,32 +4998,64 @@ void Application::renderExpressionEditorModal()
 
         if (m_visualQueryNodes.empty())
         {
-            ImGui::TextDisabled("Aucune table sur le canevas.");
+            ImGui::TextDisabled("Aucune table ou CTE sur le canevas.");
         }
-        else if (m_activeProject)
+        else
         {
             for (const auto &node : m_visualQueryNodes)
             {
-                if (!m_activeProject->datasets().contains(node.datasetName))
-                    continue;
-                const auto &ds = m_activeProject->datasets().at(node.datasetName);
-                std::string header = node.alias + " (" + node.datasetName + ")";
-                if (ImGui::TreeNodeEx(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                std::string prefix = node.alias.empty() ? "" : (node.alias + ".");
+                std::string header = (node.isCTE ? "[CTE] " : "") + node.alias + " (" + node.datasetName + ")";
+
+                // Cas 1 : Le nœud est une requête enregistrée (CTE)
+                if (node.isCTE)
                 {
-                    for (const auto &[idx, col] : ds.columns())
+                    if (ImGui::TreeNodeEx(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
                     {
-                        std::string qual = node.alias + "." + col.name();
-                        if (ImGui::Selectable(qual.c_str()))
+                        bool foundCte = false;
+                        for (const auto &sq : m_savedQueries)
                         {
-                            appendSnippetToFormula(qual);
+                            if (sq.name == node.datasetName)
+                            {
+                                foundCte = true;
+                                for (const auto &col : sq.outputSchema)
+                                {
+                                    std::string qual = prefix + col.name;
+                                    if (ImGui::Selectable(qual.c_str()))
+                                    {
+                                        appendSnippetToFormula(qual);
+                                    }
+                                    ImGui::SetItemTooltip("Cliquer pour insérer '%s' (%s)", qual.c_str(), col.dataType.c_str());
+                                }
+                                break;
+                            }
                         }
-                        ImGui::SetItemTooltip("Cliquer pour insérer '%s'", qual.c_str());
+                        if (!foundCte)
+                            ImGui::TextDisabled("(Schéma CTE introuvable)");
+                        ImGui::TreePop();
                     }
-                    ImGui::TreePop();
+                }
+                // Cas 2 : Le nœud est une table physique (Dataset)
+                else if (m_activeProject && m_activeProject->datasets().contains(node.datasetName))
+                {
+                    const auto &ds = m_activeProject->datasets().at(node.datasetName);
+                    if (ImGui::TreeNodeEx(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        for (const auto &[idx, col] : ds.columns())
+                        {
+                            std::string qual = prefix + col.name();
+                            if (ImGui::Selectable(qual.c_str()))
+                            {
+                                appendSnippetToFormula(qual);
+                            }
+                            ImGui::SetItemTooltip("Cliquer pour insérer '%s' (%s)", qual.c_str(), col.type().c_str());
+                        }
+                        ImGui::TreePop();
+                    }
                 }
             }
         }
-        ImGui::EndChild();
+        ImGui::EndChild(); // <-- Fermeture obligatoire de ExprFieldsPalette
 
         ImGui::SameLine();
 
@@ -4912,7 +5162,6 @@ void Application::renderExpressionEditorModal()
     }
 }
 
-
 void Application::renderConnectionModals()
 {
     if (!m_activeProject)
@@ -4967,7 +5216,7 @@ void Application::renderConnectionModals()
 
         ImGui::Spacing();
 
-                // Sélecteur Mode SSL
+        // Sélecteur Mode SSL
         const char *sslModes[] = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"};
         ImGui::Text("Sécurité SSL (sslmode) :");
         ImGui::SetNextItemWidth(-1.0f);
@@ -5182,18 +5431,18 @@ void Application::renderConnectionModals()
         ImGui::SetCursorPosX(avail_x - 230.0f);
 
         if (ImGui::Button("Annuler##LogCfg", ImVec2(100.0f, 0.0f)))
-{
-m_showLogConnModal = false;
-ImGui::CloseCurrentPopup();
-}
-ImGui::SameLine();
-bool canSaveLog = (strlen(m_logConnNameBuf) > 0);
-if (!canSaveLog)
-ImGui::BeginDisabled();
-if (ImGui::Button("Enregistrer##LogCfg", ImVec2(120.0f, 0.0f)))
-{
-std::string gwName(m_logConnNameBuf);
-cppsqlx::LogicalConnection gw(gwName);
+        {
+            m_showLogConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool canSaveLog = (strlen(m_logConnNameBuf) > 0);
+        if (!canSaveLog)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Enregistrer##LogCfg", ImVec2(120.0f, 0.0f)))
+        {
+            std::string gwName(m_logConnNameBuf);
+            cppsqlx::LogicalConnection gw(gwName);
             auto assignEnvIfValid = [&](const std::string &envName, const std::string &physName)
             {
                 if (!physName.empty() && m_activeProject->physicalConnections().contains(physName))
@@ -5202,66 +5451,153 @@ cppsqlx::LogicalConnection gw(gwName);
                 }
             };
 
-assignEnvIfValid("DEV", m_logConnDevTarget);
-assignEnvIfValid("TEST", m_logConnTestTarget);
-assignEnvIfValid("PROD", m_logConnProdTarget);
-if (m_isEditingLogConn && !m_originalLogConnName.empty() && m_originalLogConnName != gwName)
+            assignEnvIfValid("DEV", m_logConnDevTarget);
+            assignEnvIfValid("TEST", m_logConnTestTarget);
+            assignEnvIfValid("PROD", m_logConnProdTarget);
+            if (m_isEditingLogConn && !m_originalLogConnName.empty() && m_originalLogConnName != gwName)
+            {
+                m_activeProject->logicalConnections().erase(m_originalLogConnName);
+            }
+            m_activeProject->logicalConnections()[gwName] = std::move(gw);
+            m_activeProject->resolveDependencies();
+            m_showLogConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!canSaveLog)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+    // =========================================================================
+    // MODALE 4 : RENOMMER UNE CONNEXION LOGIQUE
+    // =========================================================================
+    if (m_showRenameLogConnModal)
+        ImGui::OpenPopup("Renommer la connexion logique");
+    ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal("Renommer la connexion logique", &m_showRenameLogConnModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::Text("Nouveau nom de la passerelle logique :");
+        ImGui::SetNextItemWidth(-1.0f);
+        bool enterPressed = ImGui::InputText("##RenameLogInput", m_renameLogConnBuf, IM_ARRAYSIZE(m_renameLogConnBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 210.0f);
+        if (ImGui::Button("Annuler##LogRen", ImVec2(95.0f, 0.0f)))
+        {
+            m_showRenameLogConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool isValid = (strlen(m_renameLogConnBuf) > 0);
+        if (!isValid)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Valider##LogRen", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
+        {
+            std::string newName(m_renameLogConnBuf);
+            if (!m_renamingLogConnOldName.empty() && m_renamingLogConnOldName != newName &&
+                m_activeProject->logicalConnections().contains(m_renamingLogConnOldName))
+            {
+                cppsqlx::LogicalConnection gw = m_activeProject->logicalConnections().at(m_renamingLogConnOldName);
+                gw.setName(newName);
+                m_activeProject->logicalConnections().erase(m_renamingLogConnOldName);
+                m_activeProject->logicalConnections()[newName] = std::move(gw);
+                m_activeProject->resolveDependencies();
+                if (m_selectedGateway == m_renamingLogConnOldName)
+                    m_selectedGateway = newName;
+            }
+            m_showRenameLogConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!isValid)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+}
+
+void Application::addConsoleLog(const std::string &msg, LogLevel level)
 {
-m_activeProject->logicalConnections().erase(m_originalLogConnName);
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_now{};
+#ifdef _WIN32
+    localtime_s(&tm_now, &now_c);
+#else
+    localtime_r(&now_c, &tm_now);
+#endif
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm_now, "%H:%M:%S");
+
+    std::lock_guard<std::mutex> lock(m_consoleMutex);
+    m_consoleLogs.push_back(ConsoleLogEntry{oss.str(), level, msg});
+
+    // Conservation des 1000 dernières lignes pour garder une interface fluide
+    if (m_consoleLogs.size() > 1000)
+    {
+        m_consoleLogs.pop_front();
+    }
 }
-m_activeProject->logicalConnections()[gwName] = std::move(gw);
-m_activeProject->resolveDependencies();
-m_showLogConnModal = false;
-ImGui::CloseCurrentPopup();
-}
-if (!canSaveLog)
-ImGui::EndDisabled();
-ImGui::EndPopup();
-}
-// =========================================================================
-// MODALE 4 : RENOMMER UNE CONNEXION LOGIQUE
-// =========================================================================
-if (m_showRenameLogConnModal)
-ImGui::OpenPopup("Renommer la connexion logique");
-ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
-if (ImGui::BeginPopupModal("Renommer la connexion logique", &m_showRenameLogConnModal, ImGuiWindowFlags_NoResize))
+
+void Application::renderConsolePanel()
 {
-ImGui::Text("Nouveau nom de la passerelle logique :");
-ImGui::SetNextItemWidth(-1.0f);
-bool enterPressed = ImGui::InputText("##RenameLogInput", m_renameLogConnBuf, IM_ARRAYSIZE(m_renameLogConnBuf), ImGuiInputTextFlags_EnterReturnsTrue);
-ImGui::Spacing();
-ImGui::Separator();
-ImGui::Spacing();
-float avail_x = ImGui::GetContentRegionAvail().x;
-ImGui::SetCursorPosX(avail_x - 210.0f);
-if (ImGui::Button("Annuler##LogRen", ImVec2(95.0f, 0.0f)))
-{
-m_showRenameLogConnModal = false;
-ImGui::CloseCurrentPopup();
+    if (!m_showConsolePanel)
+        return;
+
+    ImGui::SetNextWindowSize(ImVec2(800.0f, 180.0f), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Console & Journaux d'Exécution", &m_showConsolePanel))
+    {
+        // Barre d'outils supérieure de la console
+        if (ImGui::SmallButton((std::string(ICON_LC_TRASH) + "  Effacer").c_str()))
+        {
+            std::lock_guard<std::mutex> lock(m_consoleMutex);
+            m_consoleLogs.clear();
+        }
+
+        ImGui::SameLine();
+        ImGui::Checkbox("Défilement auto", &m_consoleAutoScroll);
+
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(240.0f);
+        ImGui::InputTextWithHint("##ConsoleFilter", "Filtrer les logs...", m_consoleFilterBuf, IM_ARRAYSIZE(m_consoleFilterBuf));
+
+        ImGui::Separator();
+
+        // Zone défilante des journaux
+        ImGui::BeginChild("ConsoleScrollingRegion", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
+        {
+            std::lock_guard<std::mutex> lock(m_consoleMutex);
+            std::string filterStr(m_consoleFilterBuf);
+
+            for (const auto &entry : m_consoleLogs)
+            {
+                if (!filterStr.empty() && entry.message.find(filterStr) == std::string::npos)
+                    continue;
+
+                ImVec4 textColor = ImVec4(0.88f, 0.90f, 0.94f, 1.0f); // Info (Blanc cassé)
+                if (entry.level == LogLevel::Success)
+                    textColor = ImVec4(0.35f, 0.85f, 0.45f, 1.0f);     // Succès (Vert)
+                else if (entry.level == LogLevel::Warning)
+                    textColor = ImVec4(0.95f, 0.75f, 0.25f, 1.0f);     // Avertissement (Jaune/Ambre)
+                else if (entry.level == LogLevel::Error)
+                    textColor = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);     // Erreur (Rouge)
+
+                ImGui::TextDisabled("[%s]", entry.timestamp.c_str());
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+                ImGui::TextUnformatted(entry.message.c_str());
+                ImGui::PopStyleColor();
+            }
+
+            if (m_consoleAutoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+            {
+                ImGui::SetScrollHereY(1.0f);
+            }
+        }
+        ImGui::EndChild();
+    }
+    ImGui::End();
 }
-ImGui::SameLine();
-bool isValid = (strlen(m_renameLogConnBuf) > 0);
-if (!isValid)
-ImGui::BeginDisabled();
-if (ImGui::Button("Valider##LogRen", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
-{
-std::string newName(m_renameLogConnBuf);
-if (!m_renamingLogConnOldName.empty() && m_renamingLogConnOldName != newName &&
-m_activeProject->logicalConnections().contains(m_renamingLogConnOldName))
-{
-cppsqlx::LogicalConnection gw = m_activeProject->logicalConnections().at(m_renamingLogConnOldName);
-gw.setName(newName);
-m_activeProject->logicalConnections().erase(m_renamingLogConnOldName);
-m_activeProject->logicalConnections()[newName] = std::move(gw);
-m_activeProject->resolveDependencies();
-if (m_selectedGateway == m_renamingLogConnOldName)
-m_selectedGateway = newName;
-}
-m_showRenameLogConnModal = false;
-ImGui::CloseCurrentPopup();
-}
-if (!isValid)
-ImGui::EndDisabled();
-ImGui::EndPopup();
-}
-}
+
+
+

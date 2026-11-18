@@ -18,6 +18,9 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <deque>
+
+
 
 namespace ed = ax::NodeEditor;
 
@@ -164,6 +167,22 @@ private:
         Dracula
     };
 
+    enum class LogLevel
+    {
+        Info,
+        Success,
+        Warning,
+        Error
+    };
+
+    struct ConsoleLogEntry
+    {
+        std::string timestamp;
+        LogLevel level;
+        std::string message;
+    };
+
+
 
     // =========================================================================
     // 2. MÉTHODES DE RENDU DE L'INTERFACE (UI)
@@ -207,6 +226,11 @@ private:
     void renderConnectionModals();
         
     void applyTheme(AppTheme theme);
+
+    void addConsoleLog(const std::string &msg, LogLevel level = LogLevel::Info);
+    void renderConsolePanel();
+    void renderQueryResultsPanel();
+
 
 
     // =========================================================================
@@ -385,5 +409,13 @@ private:
     
     AppTheme m_currentTheme = AppTheme::DarkModern;
 
+    // Console de logs en temps réel
+    bool m_showConsolePanel = true;
+    bool m_consoleAutoScroll = true;
+    char m_consoleFilterBuf[128] = "";
+    std::mutex m_consoleMutex;
+    std::deque<ConsoleLogEntry> m_consoleLogs;
 
+    bool m_showQueryResultsPanel = true;
+    bool m_focusQueryResultsTab = false;
 };
