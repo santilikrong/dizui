@@ -2048,6 +2048,7 @@ void Application::applyTheme(AppTheme theme)
 
     applyNodeCanvasStyle(m_queryContext);
     applyNodeCanvasStyle(m_workflowContext);
+    applyNodeCanvasStyle(m_ctePreviewContext);
 }
 
 
@@ -6972,12 +6973,32 @@ void Application::openCtePreviewModal(const std::string &cteQueryName)
     m_previewCtePredicates.clear();
     m_previewCteProjections.clear();
 
-    if (!m_ctePreviewContext)
+    if (m_ctePreviewContext)
     {
-        ed::Config cfg;
-        cfg.SettingsFile = nullptr;
-        m_ctePreviewContext = ed::CreateEditor(&cfg);
+        ed::DestroyEditor(m_ctePreviewContext);
+        m_ctePreviewContext = nullptr;
     }
+
+    ed::Config cfg;
+    cfg.SettingsFile = nullptr;
+    cfg.NavigateButtonIndex = 1;    // Clic droit maintenu pour déplacer le graphe
+    cfg.ContextMenuButtonIndex = 2;
+    cfg.EnableSmoothZoom = true;
+    m_ctePreviewContext = ed::CreateEditor(&cfg);
+
+    // Rend les lignes d'alignement (NodeSnap) totalement transparentes
+
+    // Copie exacte du style du canevas principal
+    ed::SetCurrentEditor(m_queryContext);
+    ed::Style mainStyle = ed::GetStyle();
+
+    ed::SetCurrentEditor(m_ctePreviewContext);
+    ed::GetStyle() = mainStyle;
+    ed::SetCurrentEditor(nullptr);
+
+
+
+
 
     auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
                            [&cteQueryName](const SavedQuery &q) { return q.name == cteQueryName; });
@@ -7047,9 +7068,9 @@ void Application::renderCtePreviewModal()
         // Barre d'en-tête avec titre et bouton Fermer
         ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.25f, 1.0f), "%s  Sous-requête CTE : %s", ICON_LC_FILE_TEXT, m_previewCteName.c_str());
 
-        float rightBtnWidth = 270.0f;
+        float rightBtnWidth = 295.0f;
         ImGui::SameLine(ImGui::GetContentRegionAvail().x - rightBtnWidth + 16.0f);
-        if (ImGui::Button((std::string(ICON_LC_FOLDER_OPEN) + "  Ouvrir pour éditer").c_str(), ImVec2(160.0f, 26.0f)))
+        if (ImGui::Button((std::string(ICON_LC_FOLDER_OPEN) + "  Ouvrir pour éditer").c_str(), ImVec2(185.0f, 26.0f)))
         {
             auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
                                    [this](const SavedQuery &q)
@@ -7082,7 +7103,7 @@ void Application::renderCtePreviewModal()
         {
             // Canevas isolé en avant-plan
             ImGui::BeginChild("CtePreviewCanvasChild", ImVec2(-1.0f, -1.0f), true,
-                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoMove);
 
             ed::SetCurrentEditor(m_ctePreviewContext);
             ed::Begin("CtePreviewGraph");
@@ -7107,11 +7128,15 @@ void Application::renderCtePreviewModal()
                     ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Table: %s", ICON_LC_DATABASE, node.datasetName.c_str());
 
                 ImGui::TextDisabled("  Alias : %s", node.alias.c_str());
-                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::Dummy(ImVec2(0.0f, 2.0f));
 
                 auto drawPreviewCol = [&](size_t idx, const std::string &cName, const std::string &cType)
                 {
-                    ed::BeginPin((node.id * 1000) + idx, ed::PinKind::Input);
+                    uintptr_t inPin = (node.id * 1000) + idx;
+                    uintptr_t outPin = (node.id * 1000) + idx + 500;
+
+                    ed::BeginPin(inPin, ed::PinKind::Input);
                     bool checked = node.selectedColumns.contains(idx);
                     ImGui::TextColored(checked ? ImVec4(0.35f, 0.85f, 0.45f, 1.0f) : ImVec4(0.55f, 0.58f, 0.65f, 1.0f),
                                        "%s %s", checked ? "[x]" : "[ ]", cName.c_str());
@@ -7121,7 +7146,7 @@ void Application::renderCtePreviewModal()
                     ImGui::TextDisabled(": %s", cType.c_str());
 
                     ImGui::SameLine(275.0f);
-                    ed::BeginPin((node.id * 1000) + idx + 500, ed::PinKind::Output);
+                    ed::BeginPin(outPin, ed::PinKind::Output);
                     ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 0.5f), ICON_LC_CHEVRON_RIGHT);
                     ed::EndPin();
                 };
@@ -7144,11 +7169,13 @@ void Application::renderCtePreviewModal()
                     for (const auto &[idx, colObj] : ds.columns())
                         drawPreviewCol(idx, colObj.name(), colObj.type());
                 }
+
                 ImGui::EndGroup();
                 ed::EndNode();
                 if (node.isCTE)
                     ed::PopStyleColor();
             }
+
             // 2. Rendu des nœuds Filtres WHERE
             for (auto &pred : m_previewCtePredicates)
             {
@@ -7171,18 +7198,82 @@ void Application::renderCtePreviewModal()
                 }
             }
 
-            // 3. Rendu des Jointures
+            // 3. Rendu des Jointures avec badge central (positionné une seule fois)
+            static uintptr_t s_lastCenteredPreviewId = 0;
             for (const auto &link : m_previewCteLinks)
             {
-                ed::Link(link.id, link.startPinId, link.endPinId, ImVec4(1.0f, 0.8f, 0.2f, 0.9f), 2.5f);
+                const char *joinLabel = "INNER JOIN";
+                ImVec4 joinColor = ImVec4(1.0f, 0.80f, 0.20f, 1.0f);
+
+                if (link.type == cppsqlx::JoinType::LEFT)
+                {
+                    joinLabel = "LEFT JOIN";
+                    joinColor = ImVec4(0.35f, 0.75f, 1.0f, 1.0f);
+                }
+                else if (link.type == cppsqlx::JoinType::RIGHT)
+                {
+                    joinLabel = "RIGHT JOIN";
+                    joinColor = ImVec4(0.75f, 0.55f, 0.95f, 1.0f);
+                }
+                else if (link.type == cppsqlx::JoinType::FULL)
+                {
+                    joinLabel = "FULL JOIN";
+                    joinColor = ImVec4(0.95f, 0.55f, 0.35f, 1.0f);
+                }
+
+                // Positionnement calculé uniquement lors du centrage initial
+                if (m_needsCtePreviewCentering)
+                {
+                    ImVec2 posA = ed::GetNodePosition(link.startPinId / 1000);
+                    ImVec2 posB = ed::GetNodePosition(link.endPinId / 1000);
+                    ImVec2 midPos((posA.x + posB.x) * 0.5f + 110.0f, (posA.y + posB.y) * 0.5f + 40.0f);
+                    ed::SetNodePosition(link.centralNodeId, midPos);
+                }
+
+                ed::PushStyleColor(ed::StyleColor_NodeBg, ImVec4(0.14f, 0.17f, 0.22f, 0.95f));
+                ed::PushStyleColor(ed::StyleColor_NodeBorder, joinColor);
+
+                ed::BeginNode(link.centralNodeId);
+                ed::BeginPin(link.leftPinId, ed::PinKind::Input);
+                ImGui::TextColored(joinColor, "%s", ICON_LC_GIT_MERGE);
+                ed::EndPin();
+
+                ImGui::SameLine();
+                ImGui::TextColored(joinColor, "%s", joinLabel);
+
+                ImGui::SameLine();
+                ed::BeginPin(link.rightPinId, ed::PinKind::Output);
+                ImGui::TextColored(joinColor, "%s", ICON_LC_CHEVRON_RIGHT);
+                ed::EndPin();
+                ed::EndNode();
+
+                ed::PopStyleColor(2);
+
+                ed::Link(link.id, link.startPinId, link.leftPinId, joinColor, 2.5f);
+                ed::Link(link.id + 50000, link.rightPinId, link.endPinId, joinColor, 2.5f);
             }
 
-            // 4. Rendu du nœud Projection SELECT
+            // 4. Rendu du nœud Projection SELECT (positionné à droite des tables)
             if (!m_previewCteProjections.empty())
             {
+                if (m_needsCtePreviewCentering)
+                {
+                    float maxX = 400.0f;
+                    float avgY = 100.0f;
+                    for (const auto &n : m_previewCteNodes)
+                    {
+                        if (n.position.x + 350.0f > maxX)
+                            maxX = n.position.x + 350.0f;
+                        avgY = n.position.y;
+                    }
+                    ed::SetNodePosition(999999, ImVec2(maxX, avgY));
+                }
+
                 ed::BeginNode(999999);
                 ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s  Projection SELECT", ICON_LC_LAYERS);
-                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::Dummy(ImVec2(0.0f, 2.0f));
+
                 for (const auto &proj : m_previewCteProjections)
                 {
                     ImGui::Text("%s", proj.sqlExpression.c_str());
@@ -7195,6 +7286,7 @@ void Application::renderCtePreviewModal()
                 ed::NavigateToContent(0.0f);
                 m_needsCtePreviewCentering = false;
             }
+
             ed::End();
             ed::SetCurrentEditor(nullptr);
             ImGui::EndChild();
