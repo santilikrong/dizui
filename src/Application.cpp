@@ -7350,438 +7350,432 @@ void Application::renderCtePreviewModal()
         outSteps.push_back(CteChainStep{cteName, cteName, false, currentDepth, nullptr});
     }
 
-void Application::renderCteStackEditor()
-{
-    ImGui::Spacing();
-
-    // Barre d'outils supérieure
-    bool hasNodes = !m_visualQueryNodes.empty();
-    bool hasConnection = (m_activeProject &&
-                          m_activeProject->logicalConnections().contains(m_selectedGateway) &&
-                          m_activeProject->logicalConnections().at(m_selectedGateway).environments().contains(m_selectedContext));
-
-    if (!hasNodes || !hasConnection)
-        ImGui::BeginDisabled();
-
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.58f, 0.30f, 0.90f));
-    if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Exécuter le Pipeline Complet").c_str(), ImVec2(230.0f, 28.0f)))
-    {
-        std::string fullSql = compileVisualGraphToSelectQuery().toSQL();
-        executeRawSqlQuery(fullSql);
-    }
-    ImGui::PopStyleColor();
-
-    if (!hasNodes || !hasConnection)
-        ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    if (!hasNodes)
-        ImGui::BeginDisabled();
-    if (ImGui::Button((std::string(ICON_LC_FILE_TEXT) + "  Voir le SQL Compilé").c_str(), ImVec2(185.0f, 28.0f)))
-    {
-        std::string fullSql = compileVisualGraphToSelectQuery().toSQL();
-        snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", fullSql.c_str());
-        addConsoleLog("SQL compilé copié dans l'éditeur de texte.", LogLevel::Info);
-    }
-    if (!hasNodes)
-        ImGui::EndDisabled();
-
-    // Sélecteur d'orientation : Horizontal (Gauche -> Droite) / Vertical (Haut -> Bas)
-    ImGui::SameLine();
-    ImGui::TextDisabled("  |  Disposition :");
-    ImGui::SameLine();
-    if (m_cteStackHorizontal)
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.52f, 0.85f, 0.90f));
-    if (ImGui::Button("Horizontale", ImVec2(105.0f, 28.0f)))
-        m_cteStackHorizontal = true;
-    if (m_cteStackHorizontal)
-        ImGui::PopStyleColor();
-
-    ImGui::SameLine();
-    if (!m_cteStackHorizontal)
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.52f, 0.85f, 0.90f));
-    if (ImGui::Button("Verticale", ImVec2(95.0f, 28.0f)))
-        m_cteStackHorizontal = false;
-    if (!m_cteStackHorizontal)
-        ImGui::PopStyleColor();
-
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Zone défilante principale (défilement horizontal activé en mode Horizontal)
-    ImGuiWindowFlags scrollFlags = m_cteStackHorizontal ? ImGuiWindowFlags_HorizontalScrollbar : ImGuiWindowFlags_None;
-    ImGui::BeginChild("CteStackScrollRegion", ImVec2(-1.0f, -1.0f), false, scrollFlags);
-
-    // Réception Drag & Drop directe si l'utilisateur glisse une CTE ou Table dans cette vue
-    if (ImGui::BeginDragDropTarget())
-    {
-        if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_CTE_QUERY_NODE"))
-        {
-            std::string cteName(static_cast<const char *>(payload->Data));
-            uintptr_t newId = 100;
-            for (const auto &n : m_visualQueryNodes)
-                if (n.id >= newId) newId = n.id + 1;
-
-            std::string alias = "cte_" + std::to_string(newId);
-            m_visualQueryNodes.push_back(VisualQueryNode{
-                newId, cteName, ImVec2(150.0f, 150.0f), true, alias, {}, true});
-        }
-        else if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_DATASET_NODE"))
-        {
-            std::string dsName(static_cast<const char *>(payload->Data));
-            uintptr_t newId = 100;
-            for (const auto &n : m_visualQueryNodes)
-                if (n.id >= newId) newId = n.id + 1;
-
-            std::string alias = dsName;
-            int suffix = 2;
-            while (std::any_of(m_visualQueryNodes.begin(), m_visualQueryNodes.end(),
-                               [&alias](const VisualQueryNode &n) { return n.alias == alias; }))
-            {
-                alias = dsName + "_" + std::to_string(suffix++);
-            }
-            m_visualQueryNodes.push_back(VisualQueryNode{
-                newId, dsName, ImVec2(150.0f, 150.0f), true, alias, {}, false});
-        }
-        ImGui::EndDragDropTarget();
-    }
-
-    if (m_visualQueryNodes.empty())
+    void Application::renderCteStackEditor()
     {
         ImGui::Spacing();
-        ImGui::TextDisabled("   Aucune CTE ou table dans le pipeline.");
-        ImGui::TextDisabled("   Glissez-déposez des requêtes enregistrées ou des tables ici (ou depuis le Query Visual Designer).");
-        ImGui::EndChild();
-        return;
-    }
 
-    // =========================================================================
-    // 1. CONSTRUCTION DE LA CHAÎNE COMPLÈTE (CTE AMONT -> CTE FINALES -> TABLES)
-    // =========================================================================
-    std::vector<CteChainStep> fullPipeline;
-    std::unordered_set<std::string> visitedCtes;
+        // Barre d'outils supérieure
+        bool hasNodes = !m_visualQueryNodes.empty();
+        bool hasConnection = (m_activeProject &&
+                              m_activeProject->logicalConnections().contains(m_selectedGateway) &&
+                              m_activeProject->logicalConnections().at(m_selectedGateway).environments().contains(m_selectedContext));
 
-    for (const auto &node : m_visualQueryNodes)
-    {
-        if (node.isCTE)
+        if (!hasNodes || !hasConnection)
+            ImGui::BeginDisabled();
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.58f, 0.30f, 0.90f));
+        if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Exécuter le Pipeline Complet").c_str(), ImVec2(230.0f, 28.0f)))
         {
-            size_t beforeCount = fullPipeline.size();
-            collectCteDependenciesRecursive(node.datasetName, visitedCtes, fullPipeline, 0);
+            std::string fullSql = compileVisualGraphToSelectQuery().toSQL();
+            executeRawSqlQuery(fullSql);
+        }
+        ImGui::PopStyleColor();
 
-            if (fullPipeline.size() > beforeCount)
+        if (!hasNodes || !hasConnection)
+            ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        if (!hasNodes)
+            ImGui::BeginDisabled();
+        if (ImGui::Button((std::string(ICON_LC_FILE_TEXT) + "  Voir le SQL Compilé").c_str(), ImVec2(185.0f, 28.0f)))
+        {
+            std::string fullSql = compileVisualGraphToSelectQuery().toSQL();
+            snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", fullSql.c_str());
+            addConsoleLog("SQL compilé copié dans l'éditeur de texte.", LogLevel::Info);
+        }
+        if (!hasNodes)
+            ImGui::EndDisabled();
+
+        // Sélecteur d'orientation : Horizontal (Gauche -> Droite) / Vertical (Haut -> Bas)
+        ImGui::SameLine();
+        ImGui::TextDisabled("  |  Disposition :");
+        ImGui::SameLine();
+        if (m_cteStackHorizontal)
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.52f, 0.85f, 0.90f));
+        if (ImGui::Button("Horizontale", ImVec2(105.0f, 28.0f)))
+            m_cteStackHorizontal = true;
+        if (m_cteStackHorizontal)
+            ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        if (!m_cteStackHorizontal)
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.52f, 0.85f, 0.90f));
+        if (ImGui::Button("Verticale", ImVec2(95.0f, 28.0f)))
+            m_cteStackHorizontal = false;
+        if (!m_cteStackHorizontal)
+            ImGui::PopStyleColor();
+
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Zone défilante principale
+        ImGuiWindowFlags scrollFlags = m_cteStackHorizontal ? ImGuiWindowFlags_HorizontalScrollbar : ImGuiWindowFlags_None;
+        ImGui::BeginChild("CteStackScrollRegion", ImVec2(-1.0f, -1.0f), false, scrollFlags);
+
+        // Réception Drag & Drop directe
+        if (ImGui::BeginDragDropTarget())
+        {
+            if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_CTE_QUERY_NODE"))
             {
-                fullPipeline.back().isRootNode = true;
-                fullPipeline.back().alias = node.alias;
-                fullPipeline.back().canvasNode = &node;
+                std::string cteName(static_cast<const char *>(payload->Data));
+                uintptr_t newId = 100;
+                for (const auto &n : m_visualQueryNodes)
+                    if (n.id >= newId)
+                        newId = n.id + 1;
+
+                std::string alias = "cte_" + std::to_string(newId);
+                m_visualQueryNodes.push_back(VisualQueryNode{
+                    newId, cteName, ImVec2(150.0f, 150.0f), true, alias, {}, true});
+            }
+            else if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_DATASET_NODE"))
+            {
+                std::string dsName(static_cast<const char *>(payload->Data));
+                uintptr_t newId = 100;
+                for (const auto &n : m_visualQueryNodes)
+                    if (n.id >= newId)
+                        newId = n.id + 1;
+
+                std::string alias = dsName;
+                int suffix = 2;
+                while (std::any_of(m_visualQueryNodes.begin(), m_visualQueryNodes.end(),
+                                   [&alias](const VisualQueryNode &n)
+                                   { return n.alias == alias; }))
+                {
+                    alias = dsName + "_" + std::to_string(suffix++);
+                }
+                m_visualQueryNodes.push_back(VisualQueryNode{
+                    newId, dsName, ImVec2(150.0f, 150.0f), true, alias, {}, false});
+            }
+            ImGui::EndDragDropTarget();
+        }
+
+        if (m_visualQueryNodes.empty())
+        {
+            ImGui::Spacing();
+            ImGui::TextDisabled("   Aucune CTE ou table dans le pipeline.");
+            ImGui::TextDisabled("   Glissez-déposez des requêtes enregistrées ou des tables ici (ou depuis le Query Visual Designer).");
+            ImGui::EndChild();
+            return;
+        }
+
+        // =========================================================================
+        // 1. CONSTRUCTION DE LA CHAÎNE COMPLÈTE (CTE AMONT -> CTE FINALES -> TABLES)
+        // =========================================================================
+        std::vector<CteChainStep> fullPipeline;
+        std::unordered_set<std::string> visitedCtes;
+
+        for (const auto &node : m_visualQueryNodes)
+        {
+            if (node.isCTE)
+            {
+                size_t beforeCount = fullPipeline.size();
+                collectCteDependenciesRecursive(node.datasetName, visitedCtes, fullPipeline, 0);
+
+                if (fullPipeline.size() > beforeCount)
+                {
+                    fullPipeline.back().isRootNode = true;
+                    fullPipeline.back().alias = node.alias;
+                    fullPipeline.back().canvasNode = &node;
+                }
             }
         }
-    }
 
-    for (const auto &node : m_visualQueryNodes)
-    {
-        if (!node.isCTE)
+        for (const auto &node : m_visualQueryNodes)
         {
-            fullPipeline.push_back(CteChainStep{node.datasetName, node.alias, true, 0, &node});
+            if (!node.isCTE)
+            {
+                fullPipeline.push_back(CteChainStep{node.datasetName, node.alias, true, 0, &node});
+            }
         }
-    }
 
-    // Dimensions adaptatives selon l'orientation choisie
-    float availW = ImGui::GetContentRegionAvail().x;
-    float availH = ImGui::GetContentRegionAvail().y;
+        // Dimensions compactes
+        float availW = ImGui::GetContentRegionAvail().x;
+        float availH = ImGui::GetContentRegionAvail().y;
 
-    float cardWidth = m_cteStackHorizontal ? 380.0f : std::min(780.0f, availW - 20.0f);
-    float leftMargin = m_cteStackHorizontal ? 12.0f : std::max(0.0f, (availW - cardWidth) * 0.5f);
-    float fixedHorizCardHeight = std::max(260.0f, availH - 35.0f);
+        float cardWidth = m_cteStackHorizontal ? 245.0f : std::min(680.0f, availW - 20.0f);
+        float leftMargin = m_cteStackHorizontal ? 8.0f : std::max(0.0f, (availW - cardWidth) * 0.5f);
+        float fixedHorizCardHeight = std::max(240.0f, availH - 32.0f);
 
-    // =========================================================================
-    // 2. RENDU DE L'EMPILEMENT (HORIZONTAL OU VERTICAL)
-    // =========================================================================
-    for (int stepIdx = 0; stepIdx < int(fullPipeline.size()); ++stepIdx)
-    {
-        const auto &step = fullPipeline[stepIdx];
-        bool isCteStep = (step.canvasNode == nullptr || step.canvasNode->isCTE);
+        // =========================================================================
+        // 2. RENDU DE L'EMPILEMENT COMPACT (HORIZONTAL OU VERTICAL)
+        // =========================================================================
+        for (int stepIdx = 0; stepIdx < int(fullPipeline.size()); ++stepIdx)
+        {
+            const auto &step = fullPipeline[stepIdx];
+            bool isCteStep = (step.canvasNode == nullptr || step.canvasNode->isCTE);
 
+            if (!m_cteStackHorizontal || stepIdx == 0)
+            {
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin);
+            }
+
+            ImVec4 borderCol = isCteStep
+                                   ? (step.isRootNode ? ImVec4(0.95f, 0.70f, 0.25f, 0.90f) : ImVec4(0.75f, 0.55f, 0.25f, 0.65f))
+                                   : ImVec4(0.30f, 0.75f, 1.0f, 0.85f);
+            ImVec4 headerCol = isCteStep ? ImVec4(0.95f, 0.70f, 0.25f, 1.0f) : ImVec4(0.30f, 0.75f, 1.0f, 1.0f);
+
+            ImGui::PushStyleColor(ImGuiCol_Border, borderCol);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, step.isRootNode ? 1.8f : 1.2f);
+
+            const SavedQuery *cteRef = nullptr;
+            size_t colCount = 0;
+            if (isCteStep)
+            {
+                for (const auto &sq : m_savedQueries)
+                {
+                    if (sq.name == step.queryName)
+                    {
+                        cteRef = &sq;
+                        colCount = sq.outputSchema.size();
+                        break;
+                    }
+                }
+            }
+            else if (m_activeProject && m_activeProject->datasets().contains(step.queryName))
+            {
+                colCount = m_activeProject->datasets().at(step.queryName).columns().size();
+            }
+
+            float cardHeight = m_cteStackHorizontal
+                                   ? fixedHorizCardHeight
+                                   : (colCount == 0 ? 90.0f : (76.0f + std::min<size_t>(colCount, 10) * 22.0f));
+
+            std::string cardChildId = "PipelineStepCard_" + std::to_string(stepIdx);
+            ImGui::BeginChild(cardChildId.c_str(), ImVec2(cardWidth, cardHeight), true);
+
+            // --- En-tête compact ---
+            std::string shortTitle = step.queryName;
+            if (m_cteStackHorizontal && shortTitle.length() > 16)
+                shortTitle = shortTitle.substr(0, 14) + "..";
+
+            if (isCteStep)
+                ImGui::TextColored(headerCol, "%s %s", ICON_LC_FILE_TEXT, shortTitle.c_str());
+            else
+                ImGui::TextColored(headerCol, "%s %s", ICON_LC_DATABASE, shortTitle.c_str());
+
+            if (ImGui::IsItemHovered())
+                ImGui::SetItemTooltip("%s : %s", isCteStep ? "CTE" : "Table", step.queryName.c_str());
+
+            // Boutons d'action en haut à droite de la carte
+            if (isCteStep && cteRef != nullptr)
+            {
+                ImGui::SameLine(cardWidth - 62.0f);
+                ImGui::PushID(("eye_" + std::to_string(stepIdx)).c_str());
+                if (ImGui::SmallButton(ICON_LC_EYE))
+                {
+                    m_pendingCtePreviewName = step.queryName;
+                }
+                ImGui::SetItemTooltip("Aperçu graphique de '%s'", step.queryName.c_str());
+                ImGui::PopID();
+
+                ImGui::SameLine();
+
+                if (!hasConnection)
+                    ImGui::BeginDisabled();
+                ImGui::PushID(("play_" + std::to_string(stepIdx)).c_str());
+                if (ImGui::SmallButton(ICON_LC_PLAY))
+                {
+                    executeRawSqlQuery(cteRef->sql);
+                }
+                ImGui::SetItemTooltip("Exécuter '%s' seule", step.queryName.c_str());
+                ImGui::PopID();
+                if (!hasConnection)
+                    ImGui::EndDisabled();
+            }
+
+            ImGui::TextDisabled("Alias : %s", step.alias.c_str());
+            ImGui::Separator();
+
+            // --- Liste directe des colonnes (sans BeginChild imbriqué, types affichés au survol) ---
+            if (isCteStep && cteRef != nullptr)
+            {
+                for (size_t cIdx = 0; cIdx < cteRef->outputSchema.size(); ++cIdx)
+                {
+                    const auto &col = cteRef->outputSchema[cIdx];
+                    if (step.isRootNode && step.canvasNode != nullptr)
+                    {
+                        VisualQueryNode *mutableNode = const_cast<VisualQueryNode *>(step.canvasNode);
+                        ImGui::PushID(int(cIdx));
+                        bool isSelected = mutableNode->selectedColumns.contains(cIdx);
+                        if (ImGui::Checkbox("##colChk", &isSelected))
+                        {
+                            std::string qualExpr = mutableNode->alias.empty() ? col.name : (mutableNode->alias + "." + col.name);
+                            std::string defAlias = mutableNode->alias.empty() ? col.name : (mutableNode->alias + "_" + col.name);
+                            if (isSelected)
+                            {
+                                mutableNode->selectedColumns.insert(cIdx);
+                                auto it = std::find_if(m_projectionItems.begin(), m_projectionItems.end(),
+                                                       [&qualExpr](const VisualProjectionItem &p)
+                                                       { return !p.isCustomExpression && p.sqlExpression == qualExpr; });
+                                if (it == m_projectionItems.end())
+                                {
+                                    uintptr_t nextId = m_projectionItems.size() + 70000;
+                                    m_projectionItems.push_back(VisualProjectionItem{
+                                        nextId, defAlias, qualExpr, false, false, mutableNode->id});
+                                }
+                                m_hasProjectionNode = true;
+                            }
+                            else
+                            {
+                                mutableNode->selectedColumns.erase(cIdx);
+                                std::erase_if(m_projectionItems,
+                                              [&qualExpr](const VisualProjectionItem &p)
+                                              { return !p.isCustomExpression && p.sqlExpression == qualExpr; });
+                            }
+                        }
+                        ImGui::SameLine();
+                        ImGui::TextUnformatted(col.name.c_str());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetItemTooltip("Type : %s", col.dataType.c_str());
+                        ImGui::PopID();
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled(" - %s", col.name.c_str());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetItemTooltip("Type : %s", col.dataType.c_str());
+                    }
+                }
+            }
+            else if (!isCteStep && m_activeProject && m_activeProject->datasets().contains(step.queryName))
+            {
+                const auto &ds = m_activeProject->datasets().at(step.queryName);
+                VisualQueryNode *mutableNode = const_cast<VisualQueryNode *>(step.canvasNode);
+                for (const auto &[cIdx, colObj] : ds.columns())
+                {
+                    ImGui::PushID(int(cIdx));
+                    bool isSelected = mutableNode && mutableNode->selectedColumns.contains(cIdx);
+                    if (mutableNode && ImGui::Checkbox("##colChkTbl", &isSelected))
+                    {
+                        std::string qualExpr = mutableNode->alias.empty() ? colObj.name() : (mutableNode->alias + "." + colObj.name());
+                        std::string defAlias = mutableNode->alias.empty() ? colObj.name() : (mutableNode->alias + "_" + colObj.name());
+                        if (isSelected)
+                        {
+                            mutableNode->selectedColumns.insert(cIdx);
+                            m_projectionItems.push_back(VisualProjectionItem{
+                                m_projectionItems.size() + 70000, defAlias, qualExpr, false, false, mutableNode->id});
+                            m_hasProjectionNode = true;
+                        }
+                        else
+                        {
+                            mutableNode->selectedColumns.erase(cIdx);
+                            std::erase_if(m_projectionItems,
+                                          [&qualExpr](const VisualProjectionItem &p)
+                                          { return !p.isCustomExpression && p.sqlExpression == qualExpr; });
+                        }
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(colObj.name().c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetItemTooltip("Type : %s", colObj.type().c_str());
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndChild(); // Fin de PipelineStepCard
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor();
+            // Connecteur vers l'étape suivante
+            if (m_cteStackHorizontal)
+            {
+                ImGui::SameLine(0.0f, 6.0f);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (cardHeight * 0.5f) - 10.0f);
+                ImGui::TextColored(ImVec4(0.55f, 0.65f, 0.80f, 0.90f), "%s", ICON_LC_CHEVRON_RIGHT);
+                ImGui::SameLine(0.0f, 6.0f);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() - (cardHeight * 0.5f) + 10.0f);
+            }
+            else
+            {
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin + (cardWidth * 0.5f) - 10.0f);
+                ImGui::TextColored(ImVec4(0.55f, 0.65f, 0.80f, 0.90f), "%s", ICON_LC_ARROW_DOWN);
+            }
+        }
+        // =========================================================================
+        // 3. BLOC PROJECTION FINALE COMPACT (C1, C2, ...)
+        // =========================================================================
+        float projWidth = m_cteStackHorizontal ? 310.0f : cardWidth;
+        float projHeight = m_cteStackHorizontal
+                               ? fixedHorizCardHeight
+                               : (90.0f + std::min<size_t>(m_projectionItems.size(), 10) * 26.0f);
         if (!m_cteStackHorizontal)
         {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin);
         }
-        else if (stepIdx == 0)
-        {
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin);
-        }
-
-        ImVec4 borderCol = isCteStep
-                               ? (step.isRootNode ? ImVec4(0.95f, 0.70f, 0.25f, 0.90f) : ImVec4(0.75f, 0.55f, 0.25f, 0.65f))
-                               : ImVec4(0.30f, 0.75f, 1.0f, 0.85f);
-        ImVec4 headerCol = isCteStep ? ImVec4(0.95f, 0.70f, 0.25f, 1.0f) : ImVec4(0.30f, 0.75f, 1.0f, 1.0f);
-
-        ImGui::PushStyleColor(ImGuiCol_Border, borderCol);
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.85f, 0.45f, 0.90f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, step.isRootNode ? 1.8f : 1.2f);
-
-        const SavedQuery *cteRef = nullptr;
-        size_t colCount = 0;
-        if (isCteStep)
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.8f);
+        ImGui::BeginChild("FinalProjectionCard", ImVec2(projWidth, projHeight), true);
+        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s  PROJECTION (%d)",
+                           ICON_LC_LAYERS, int(m_projectionItems.size()));
+        ImGui::Separator();
+        if (m_projectionItems.empty())
         {
-            for (const auto &sq : m_savedQueries)
-            {
-                if (sq.name == step.queryName)
-                {
-                    cteRef = &sq;
-                    colCount = sq.outputSchema.size();
-                    break;
-                }
-            }
-        }
-        else if (m_activeProject && m_activeProject->datasets().contains(step.queryName))
-        {
-            colCount = m_activeProject->datasets().at(step.queryName).columns().size();
-        }
-
-        float cardHeight = m_cteStackHorizontal
-                               ? fixedHorizCardHeight
-                               : (colCount == 0 ? 95.0f : (82.0f + std::min<size_t>(colCount, 8) * 22.0f));
-
-        std::string cardChildId = "PipelineStepCard_" + std::to_string(stepIdx);
-        ImGui::BeginChild(cardChildId.c_str(), ImVec2(cardWidth, cardHeight), true);
-
-        // --- En-tête de la carte ---
-        if (isCteStep)
-        {
-            if (step.isRootNode)
-                ImGui::TextColored(headerCol, "%s  CTE %d : %s", ICON_LC_FILE_TEXT, stepIdx + 1, step.queryName.c_str());
-            else
-                ImGui::TextColored(headerCol, "%s  CTE %d (Amont) : %s", ICON_LC_FILE_TEXT, stepIdx + 1, step.queryName.c_str());
+            ImGui::TextDisabled("Cochez des colonnes pour C1, C2...");
         }
         else
         {
-            ImGui::TextColored(headerCol, "%s  TABLE %d : %s", ICON_LC_DATABASE, stepIdx + 1, step.queryName.c_str());
-        }
-
-        // Boutons d'action en haut à droite de la carte
-        ImGui::SameLine(cardWidth - 75.0f);
-        if (isCteStep && cteRef != nullptr)
-        {
-            ImGui::PushID(("eye_" + std::to_string(stepIdx)).c_str());
-            if (ImGui::SmallButton(ICON_LC_EYE))
+            int projRemoveIdx = -1;
+            for (int pIdx = 0; pIdx < int(m_projectionItems.size()); ++pIdx)
             {
-                m_pendingCtePreviewName = step.queryName;
+                auto &item = m_projectionItems[pIdx];
+                ImGui::PushID(pIdx + 50000);
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "C%d", pIdx + 1);
+                ImGui::SameLine(34.0f);
+                if (m_cteStackHorizontal)
+                {
+                    std::string shortExpr = item.sqlExpression;
+                    if (shortExpr.length() > 16)
+                        shortExpr = shortExpr.substr(0, 14) + "..";
+                    ImGui::TextUnformatted(shortExpr.c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetItemTooltip("%s", item.sqlExpression.c_str());
+                    ImGui::SameLine(155.0f);
+                    ImGui::SetNextItemWidth(105.0f);
+                }
+                else
+                {
+                    ImGui::TextUnformatted(item.sqlExpression.c_str());
+                    ImGui::SameLine(320.0f);
+                    ImGui::TextDisabled("AS");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(180.0f);
+                }
+                std::array<char, 128> outAliasBuf{};
+                snprintf(outAliasBuf.data(), outAliasBuf.size(), "%s", item.alias.c_str());
+                if (ImGui::InputText("##ProjOutAlias", outAliasBuf.data(), outAliasBuf.size()))
+                {
+                    item.alias = outAliasBuf.data();
+                }
+                ImGui::SameLine(projWidth - 34.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+                if (ImGui::SmallButton(ICON_LC_TRASH))
+                    projRemoveIdx = pIdx;
+                ImGui::PopStyleColor();
+                ImGui::PopID();
             }
-            ImGui::SetItemTooltip("Visualiser le graphe de '%s'", step.queryName.c_str());
-            ImGui::PopID();
-
-            ImGui::SameLine();
-
-            if (!hasConnection)
-                ImGui::BeginDisabled();
-            ImGui::PushID(("play_" + std::to_string(stepIdx)).c_str());
-            if (ImGui::SmallButton(ICON_LC_PLAY))
+            if (projRemoveIdx >= 0)
             {
-                executeRawSqlQuery(cteRef->sql);
+                m_projectionItems.erase(m_projectionItems.begin() + projRemoveIdx);
             }
-            ImGui::SetItemTooltip("Exécuter '%s' seule pour inspecter ses données", step.queryName.c_str());
-            ImGui::PopID();
-            if (!hasConnection)
-                ImGui::EndDisabled();
         }
-
-        ImGui::TextDisabled("Alias : %s", step.alias.c_str());
-        ImGui::Separator();
-
-        // --- Liste des colonnes ---
-        std::string colsChildId = "StepColsList_" + std::to_string(stepIdx);
-        ImGui::BeginChild(colsChildId.c_str(), ImVec2(-1.0f, -1.0f), false);
-
-        float typeColOffset = m_cteStackHorizontal ? 215.0f : 260.0f;
-
-        if (isCteStep && cteRef != nullptr)
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
+        if (m_cteStackHorizontal)
         {
-for (size_t cIdx = 0; cIdx < cteRef->outputSchema.size(); ++cIdx)
-{
-const auto &col = cteRef->outputSchema[cIdx];
-if (step.isRootNode && step.canvasNode != nullptr)
-{
-VisualQueryNode *mutableNode = const_cast<VisualQueryNode *>(step.canvasNode);
-ImGui::PushID(int(cIdx));
-bool isSelected = mutableNode->selectedColumns.contains(cIdx);
-if (ImGui::Checkbox("##colChk", &isSelected))
-{
-std::string qualExpr = mutableNode->alias.empty() ? col.name : (mutableNode->alias + "." + col.name);
-std::string defAlias = mutableNode->alias.empty() ? col.name : (mutableNode->alias + "_" + col.name);
-if (isSelected)
-{
-mutableNode->selectedColumns.insert(cIdx);
-auto it = std::find_if(m_projectionItems.begin(), m_projectionItems.end(),
-[&qualExpr](const VisualProjectionItem &p)
-{ return !p.isCustomExpression && p.sqlExpression == qualExpr; });
-if (it == m_projectionItems.end())
-{
-uintptr_t nextId = m_projectionItems.size() + 70000;
-m_projectionItems.push_back(VisualProjectionItem{
-nextId, defAlias, qualExpr, false, false, mutableNode->id});
-}
-m_hasProjectionNode = true;
-}
-else
-{
-mutableNode->selectedColumns.erase(cIdx);
-std::erase_if(m_projectionItems,
-[&qualExpr](const VisualProjectionItem &p)
-{ return !p.isCustomExpression && p.sqlExpression == qualExpr; });
-}
-}
-ImGui::SameLine();
-ImGui::Text("- %s", col.name.c_str());
-ImGui::SameLine(typeColOffset);
-ImGui::TextDisabled("(%s)", col.dataType.c_str());
-ImGui::PopID();
-}
-else
-{
-ImGui::TextDisabled("  - %s", col.name.c_str());
-ImGui::SameLine(typeColOffset);
-ImGui::TextDisabled("(%s)", col.dataType.c_str());
-}
-}
-}
-else if (!isCteStep && m_activeProject && m_activeProject->datasets().contains(step.queryName))
-{
-const auto &ds = m_activeProject->datasets().at(step.queryName);
-VisualQueryNode *mutableNode = const_cast<VisualQueryNode *>(step.canvasNode);
-for (const auto &[cIdx, colObj] : ds.columns())
-{
-ImGui::PushID(int(cIdx));
-bool isSelected = mutableNode && mutableNode->selectedColumns.contains(cIdx);
-if (mutableNode && ImGui::Checkbox("##colChkTbl", &isSelected))
-{
-std::string qualExpr = mutableNode->alias.empty() ? colObj.name() : (mutableNode->alias + "." + colObj.name());
-std::string defAlias = mutableNode->alias.empty() ? colObj.name() : (mutableNode->alias + "_" + colObj.name());
-if (isSelected)
-{
-mutableNode->selectedColumns.insert(cIdx);
-m_projectionItems.push_back(VisualProjectionItem{
-m_projectionItems.size() + 70000, defAlias, qualExpr, false, false, mutableNode->id});
-m_hasProjectionNode = true;
-}
-else
-{
-mutableNode->selectedColumns.erase(cIdx);
-std::erase_if(m_projectionItems,
-[&qualExpr](const VisualProjectionItem &p)
-{ return !p.isCustomExpression && p.sqlExpression == qualExpr; });
-}
-}
-ImGui::SameLine();
-ImGui::Text("- %s", colObj.name().c_str());
-ImGui::SameLine(typeColOffset);
-ImGui::TextDisabled("(%s)", colObj.type().c_str());
-ImGui::PopID();
-}
-}
-ImGui::EndChild(); // Fin de StepColsList
-ImGui::EndChild(); // Fin de PipelineStepCard
-ImGui::PopStyleVar(2);
-ImGui::PopStyleColor();
-// Connecteur vers l'étape suivante (Flèche droite en mode Horizontal, Flèche bas en mode Vertical)
-if (m_cteStackHorizontal)
-{
-ImGui::SameLine(0.0f, 10.0f);
-ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (cardHeight * 0.5f) - 10.0f);
-ImGui::TextColored(ImVec4(0.55f, 0.65f, 0.80f, 0.90f), "%s", ICON_LC_CHEVRON_RIGHT);
-ImGui::SameLine(0.0f, 10.0f);
-ImGui::SetCursorPosY(ImGui::GetCursorPosY() - (cardHeight * 0.5f) + 10.0f);
-}
-else
-{
-ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin + (cardWidth * 0.5f) - 10.0f);
-ImGui::TextColored(ImVec4(0.55f, 0.65f, 0.80f, 0.90f), "%s", ICON_LC_ARROW_DOWN);
-}
-}
-// =========================================================================
-// 3. BLOC PROJECTION FINALE (C1, C2, ...)
-// =========================================================================
-float projWidth = m_cteStackHorizontal ? 430.0f : cardWidth;
-float projHeight = m_cteStackHorizontal
-? fixedHorizCardHeight
-: (90.0f + std::min<size_t>(m_projectionItems.size(), 10) * 26.0f);
-if (!m_cteStackHorizontal)
-{
-ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftMargin);
-}
-ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.85f, 0.45f, 0.90f));
-ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
-ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.8f);
-ImGui::BeginChild("FinalProjectionCard", ImVec2(projWidth, projHeight), true);
-ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s  PROJECTION FINALE (%d)",
-ICON_LC_LAYERS, int(m_projectionItems.size()));
-ImGui::Separator();
-if (m_projectionItems.empty())
-{
-ImGui::TextDisabled("Cochez des colonnes dans les CTE pour alimenter C1, C2...");
-}
-else
-{
-int projRemoveIdx = -1;
-for (int pIdx = 0; pIdx < int(m_projectionItems.size()); ++pIdx)
-{
-auto &item = m_projectionItems[pIdx];
-ImGui::PushID(pIdx + 50000);
-ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "C%d", pIdx + 1);
-ImGui::SameLine(42.0f);
-ImGui::Text("%s", item.sqlExpression.c_str());
-if (m_cteStackHorizontal)
-{
-ImGui::SameLine(190.0f);
-ImGui::TextDisabled("AS");
-ImGui::SameLine();
-ImGui::SetNextItemWidth(135.0f);
-}
-else
-{
-ImGui::SameLine(340.0f);
-ImGui::TextDisabled("AS");
-ImGui::SameLine();
-ImGui::SetNextItemWidth(180.0f);
-}
-std::array<char, 128> outAliasBuf{};
-snprintf(outAliasBuf.data(), outAliasBuf.size(), "%s", item.alias.c_str());
-if (ImGui::InputText("##ProjOutAlias", outAliasBuf.data(), outAliasBuf.size()))
-{
-item.alias = outAliasBuf.data();
-}
-ImGui::SameLine(projWidth - 42.0f);
-ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
-if (ImGui::SmallButton(ICON_LC_TRASH))
-projRemoveIdx = pIdx;
-ImGui::PopStyleColor();
-ImGui::PopID();
-}
-if (projRemoveIdx >= 0)
-{
-m_projectionItems.erase(m_projectionItems.begin() + projRemoveIdx);
-}
-}
-ImGui::EndChild();
-ImGui::PopStyleVar(2);
-ImGui::PopStyleColor();
-if (m_cteStackHorizontal)
-{
-ImGui::SameLine(0.0f, 16.0f);
-ImGui::Dummy(ImVec2(12.0f, 1.0f));
-}
-else
-{
-ImGui::Spacing();
-}
-ImGui::EndChild(); // Fin de CteStackScrollRegion
-// Ouverture différée de l'aperçu graphique si demandée depuis une carte CTE
-if (!m_pendingCtePreviewName.empty())
-{
-std::string target = m_pendingCtePreviewName;
-m_pendingCtePreviewName.clear();
-openCtePreviewModal(target);
-}
-}
-
-
+            ImGui::SameLine(0.0f, 10.0f);
+            ImGui::Dummy(ImVec2(8.0f, 1.0f));
+        }
+        else
+        {
+            ImGui::Spacing();
+        }
+        ImGui::EndChild(); // Fin de CteStackScrollRegion
+        if (!m_pendingCtePreviewName.empty())
+        {
+            std::string target = m_pendingCtePreviewName;
+            m_pendingCtePreviewName.clear();
+            openCtePreviewModal(target);
+        }
+    }
     
