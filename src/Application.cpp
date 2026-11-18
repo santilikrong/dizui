@@ -16,11 +16,409 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <unordered_set>
 
 using namespace cppsqlx::literals;
 
 namespace
 {
+
+    struct SqlEditorCallbackUserData
+    {
+        int *cursorPos;
+        std::string *pendingInsertion;
+        int replaceStart;
+        int replaceEnd;
+    };
+
+    int sqlTextEditorCallback(ImGuiInputTextCallbackData *data)
+    {
+        auto *userData = static_cast<SqlEditorCallbackUserData *>(data->UserData);
+        if (!userData)
+            return 0;
+
+        // Si une suggestion vient d'être validée, on remplace le mot en cours dans le buffer ImGui
+        if (userData->pendingInsertion && !userData->pendingInsertion->empty())
+        {
+            int start = std::max(0, std::min(userData->replaceStart, data->BufTextLen));
+            int end = std::max(start, std::min(userData->replaceEnd, data->BufTextLen));
+
+            data->DeleteChars(start, end - start);
+            data->InsertChars(start, userData->pendingInsertion->c_str());
+            data->CursorPos = start + static_cast<int>(userData->pendingInsertion->size());
+            data->SelectionStart = data->SelectionEnd = data->CursorPos;
+
+            userData->pendingInsertion->clear();
+        }
+
+        if (userData->cursorPos)
+        {
+            *userData->cursorPos = data->CursorPos;
+        }
+        return 0;
+    }
+
+    void renderSqlSyntaxHighlightOverlay(ImDrawList *drawList, ImVec2 textOrigin, const char *text, ImFont *font, float fontSize)
+    {
+        if (!text || !*text)
+            return;
+
+        // Palette de couleurs syntaxiques (adaptée aux thèmes sombres et clairs)
+        const ImU32 colKeyword  = IM_COL32(86, 156, 214, 255);  // Bleu vif : SELECT, FROM, WHERE, JOIN...
+        const ImU32 colFunction = IM_COL32(220, 220, 170, 255); // Jaune doux : COUNT, SUM, COALESCE, CONCAT...
+        const ImU32 colString   = IM_COL32(206, 145, 120, 255); // Orange/Corail : 'chaînes de caractères'
+        const ImU32 colNumber   = IM_COL32(181, 206, 168, 255); // Vert pastel : 123, 45.67
+        const ImU32 colComment  = IM_COL32(106, 153, 85, 255);  // Vert olive : -- commentaires
+        const ImU32 colOperator = IM_COL32(180, 180, 180, 255); // Gris clair : =, <, >, (, ), ;, ,
+        const ImU32 colDefault  = IM_COL32(220, 224, 232, 255); // Blanc cassé : identifiants, tables, colonnes
+
+        static const std::unordered_set<std::string> sqlKeywords = {
+            "WITH", "AS", "SELECT", "DISTINCT", "FROM", "INNER", "LEFT", "RIGHT", "FULL",
+            "OUTER", "CROSS", "JOIN", "ON", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL",
+            "LIKE", "ILIKE", "BETWEEN", "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END",
+            "GROUP", "BY", "HAVING", "ORDER", "ASC", "DESC", "LIMIT", "OFFSET", "UNION",
+            "ALL", "INTERSECT", "EXCEPT", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
+            "CREATE", "TABLE", "VIEW", "DROP", "ALTER", "EXPLAIN", "ANALYZE", "TRUE", "FALSE"
+        };
+
+        static const std::unordered_set<std::string> sqlFunctions = {
+            "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "NULLIF", "CAST", "CONCAT",
+            "SUBSTRING", "TRIM", "LOWER", "UPPER", "LENGTH", "NOW", "CURRENT_DATE",
+            "DATE_TRUNC", "EXTRACT", "ROUND", "ABS", "ROW_NUMBER", "RANK", "DENSE_RANK", "OVER", "PARTITION"
+        };
+
+        auto toUpper = [](const std::string &s)
+        {
+            std::string up = s;
+            for (char &ch : up)
+                ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            return up;
+        };
+
+        float lineHeight = ImGui::GetTextLineHeight();
+        float spaceWidth = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, " ").x;
+        ImVec2 cursor = textOrigin;
+
+        const char *p = text;
+        while (*p)
+        {
+            // 1. Sauts de ligne et tabulations
+            if (*p == '\n')
+            {
+                cursor.x = textOrigin.x;
+                cursor.y += lineHeight;
+                ++p;
+                continue;
+            }
+            if (*p == '\r')
+            {
+                ++p;
+                continue;
+            }
+            if (*p == '\t')
+            {
+                cursor.x += spaceWidth * 4.0f;
+                ++p;
+                continue;
+            }
+            if (*p == ' ')
+            {
+                cursor.x += spaceWidth;
+                ++p;
+                continue;
+            }
+
+            // 2. Commentaire sur une ligne (-- ...)
+            if (*p == '-' && *(p + 1) == '-')
+            {
+                const char *start = p;
+                while (*p && *p != '\n')
+                    ++p;
+                drawList->AddText(font, fontSize, cursor, colComment, start, p);
+                cursor.x += font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, start, p).x;
+                continue;
+            }
+
+            // 3. Chaîne littérale ('...')
+            if (*p == '\'')
+            {
+                const char *start = p++;
+                while (*p)
+                {
+                    if (*p == '\'' && *(p + 1) == '\'')
+                    {
+                        p += 2;
+                    }
+                    else if (*p == '\'')
+                    {
+                        ++p;
+                        break;
+                    }
+                    else if (*p == '\n')
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        ++p;
+                    }
+                }
+                drawList->AddText(font, fontSize, cursor, colString, start, p);
+                cursor.x += font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, start, p).x;
+                continue;
+            }
+
+            // 4. Nombre (entier ou décimal)
+            if (std::isdigit(static_cast<unsigned char>(*p)))
+            {
+                const char *start = p;
+                while (*p && (std::isdigit(static_cast<unsigned char>(*p)) || *p == '.'))
+                    ++p;
+                drawList->AddText(font, fontSize, cursor, colNumber, start, p);
+                cursor.x += font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, start, p).x;
+                continue;
+            }
+
+            // 5. Mot-clé, fonction ou identifiant
+            if (std::isalpha(static_cast<unsigned char>(*p)) || *p == '_' || *p == '"')
+            {
+                const char *start = p;
+                if (*p == '"')
+                {
+                    ++p;
+                    while (*p && *p != '"' && *p != '\n')
+                        ++p;
+                    if (*p == '"')
+                        ++p;
+                }
+                else
+                {
+                    while (*p && (std::isalnum(static_cast<unsigned char>(*p)) || *p == '_'))
+                        ++p;
+                }
+
+                std::string word(start, p);
+                std::string up = toUpper(word);
+
+                ImU32 color = colDefault;
+                if (sqlKeywords.contains(up))
+                    color = colKeyword;
+                else if (sqlFunctions.contains(up))
+                    color = colFunction;
+
+                drawList->AddText(font, fontSize, cursor, color, start, p);
+                cursor.x += font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, start, p).x;
+                continue;
+            }
+
+            // 6. Opérateurs et ponctuation
+            const char *start = p++;
+            drawList->AddText(font, fontSize, cursor, colOperator, start, p);
+            cursor.x += font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, start, p).x;
+        }
+    }
+
+
+    std::string formatRawSqlQuery(const std::string &rawSql)
+    {
+        if (rawSql.empty())
+            return "";
+
+        // 1. Découpage en jetons tout en préservant les chaînes littérales '...' et identifiants "..."
+        std::vector<std::string> tokens;
+        std::string current;
+        bool inSingleQuote = false;
+        bool inDoubleQuote = false;
+
+        for (size_t i = 0; i < rawSql.size(); ++i)
+        {
+            char c = rawSql[i];
+            if (c == '\'' && !inDoubleQuote)
+            {
+                inSingleQuote = !inSingleQuote;
+                current.push_back(c);
+            }
+            else if (c == '"' && !inSingleQuote)
+            {
+                inDoubleQuote = !inDoubleQuote;
+                current.push_back(c);
+            }
+            else if (!inSingleQuote && !inDoubleQuote && std::isspace(static_cast<unsigned char>(c)))
+            {
+                if (!current.empty())
+                {
+                    tokens.push_back(current);
+                    current.clear();
+                }
+            }
+            else if (!inSingleQuote && !inDoubleQuote && (c == ',' || c == '(' || c == ')' || c == ';'))
+            {
+                if (!current.empty())
+                {
+                    tokens.push_back(current);
+                    current.clear();
+                }
+                tokens.emplace_back(1, c);
+            }
+            else
+            {
+                current.push_back(c);
+            }
+        }
+        if (!current.empty())
+            tokens.push_back(current);
+
+        // 2. Liste des mots-clés SQL à mettre en majuscules
+        auto toUpper = [](const std::string &s)
+        {
+            std::string up = s;
+            for (char &ch : up)
+                ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            return up;
+        };
+
+        static const std::unordered_set<std::string> keywords = {
+            "WITH", "AS", "SELECT", "DISTINCT", "FROM", "INNER", "LEFT", "RIGHT", "FULL",
+            "OUTER", "CROSS", "JOIN", "ON", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL",
+            "LIKE", "ILIKE", "BETWEEN", "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END",
+            "GROUP", "BY", "HAVING", "ORDER", "ASC", "DESC", "LIMIT", "OFFSET", "UNION",
+            "ALL", "INTERSECT", "EXCEPT", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE"
+        };
+
+        // 3. Reconstruction avec sauts de ligne et indentation
+        std::ostringstream out;
+        int parenDepth = 0;
+        bool inSelectClause = false;
+        bool newLineJustEmitted = true;
+
+        auto emitNewLine = [&](int extraIndent = 0)
+        {
+            out << "\n";
+            int spaces = (parenDepth + extraIndent) * 4;
+            if (spaces > 0)
+                out << std::string(spaces, ' ');
+            newLineJustEmitted = true;
+        };
+
+        for (size_t i = 0; i < tokens.size(); ++i)
+        {
+            std::string tok = tokens[i];
+            bool isQuoted = (!tok.empty() && (tok.front() == '\'' || tok.front() == '"'));
+            std::string up = isQuoted ? tok : toUpper(tok);
+
+            if (!isQuoted && keywords.contains(up))
+            {
+                tok = up;
+            }
+
+            // Détection des clauses principales au niveau racine (ou début de sous-requête)
+            if (!isQuoted)
+            {
+                if (up == "SELECT")
+                {
+                    inSelectClause = true;
+                    if (!newLineJustEmitted)
+                        emitNewLine();
+                    out << "SELECT";
+                    emitNewLine(1);
+                    continue;
+                }
+                if (up == "FROM" || up == "WHERE" || up == "HAVING" || up == "LIMIT" || up == "OFFSET" || up == "UNION")
+                {
+                    inSelectClause = false;
+                    emitNewLine();
+                    out << up;
+                    newLineJustEmitted = false;
+                    continue;
+                }
+                if ((up == "GROUP" || up == "ORDER") && i + 1 < tokens.size() && toUpper(tokens[i + 1]) == "BY")
+                {
+                    inSelectClause = false;
+                    emitNewLine();
+                    out << up << " BY";
+                    ++i;
+                    newLineJustEmitted = false;
+                    continue;
+                }
+                if ((up == "INNER" || up == "LEFT" || up == "RIGHT" || up == "FULL" || up == "CROSS") &&
+                    i + 1 < tokens.size() && toUpper(tokens[i + 1]) == "JOIN")
+                {
+                    inSelectClause = false;
+                    emitNewLine();
+                    out << up << " JOIN";
+                    ++i;
+                    newLineJustEmitted = false;
+                    continue;
+                }
+                if (up == "JOIN")
+                {
+                    inSelectClause = false;
+                    emitNewLine();
+                    out << "JOIN";
+                    newLineJustEmitted = false;
+                    continue;
+                }
+                if (up == "AND" || up == "OR")
+                {
+                    emitNewLine(1);
+                    out << up;
+                    newLineJustEmitted = false;
+                    continue;
+                }
+            }
+
+            if (tok == ",")
+            {
+                out << ",";
+                if (inSelectClause)
+                {
+                    emitNewLine(1);
+                }
+                else
+                {
+                    newLineJustEmitted = false;
+                }
+                continue;
+            }
+
+            if (tok == "(")
+            {
+                if (!newLineJustEmitted && i > 0 && tokens[i - 1] != "(")
+                    out << " ";
+                out << "(";
+                ++parenDepth;
+                newLineJustEmitted = false;
+                continue;
+            }
+
+            if (tok == ")")
+            {
+                if (parenDepth > 0)
+                    --parenDepth;
+                out << ")";
+                newLineJustEmitted = false;
+                continue;
+            }
+
+            if (tok == ";")
+            {
+                out << ";\n";
+                inSelectClause = false;
+                newLineJustEmitted = true;
+                continue;
+            }
+
+            if (!newLineJustEmitted && i > 0 && tokens[i - 1] != "(")
+            {
+                out << " ";
+            }
+            out << tok;
+            newLineJustEmitted = false;
+        }
+
+        return out.str();
+    }
+
     class GuiStreamRedirector : public std::streambuf
     {
     public:
@@ -2331,6 +2729,8 @@ void Application::renderMainContentZone()
     if (current_win && current_win->DockNode)
         current_win->DockNode->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
 
+    bool isQueryVisualActive = false;
+
     if (ImGui::BeginTabBar("DesignerTabBar", ImGuiTabBarFlags_None))
     {
         if (ImGui::BeginTabItem((std::string(ICON_LC_ACTIVITY) + "  Workflow Designer").c_str()))
@@ -2345,9 +2745,9 @@ void Application::renderMainContentZone()
         }
         if (ImGui::BeginTabItem((std::string(ICON_LC_SEARCH) + "  Query Visual Designer").c_str()))
         {
+            isQueryVisualActive = true;
             if (ImGui::IsItemActivated())
             {
-                m_showQueryResultsPanel = true;
                 m_focusQueryResultsTab = true;
             }
             renderQueryEditor();
@@ -2355,12 +2755,22 @@ void Application::renderMainContentZone()
         }
         if (ImGui::BeginTabItem((std::string(ICON_LC_BOX) + "  Query Text Editor").c_str()))
         {
+            isQueryVisualActive = true;
+            if (ImGui::IsItemActivated())
+            {
+                m_focusQueryResultsTab = true;
+            }
+            renderQueryTextEditor();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
     }
+
+    m_showQueryResultsPanel = isQueryVisualActive;
+
     ImGui::End();
 }
+
 
 
 void Application::renderGlobalModals()
@@ -6081,3 +6491,449 @@ void Application::renderQueryInspectAndDeleteModals()
 }
 
 
+void Application::executeRawSqlQuery(const std::string &sqlText)
+{
+    m_executionError.clear();
+    m_queryResultHeaders.clear();
+    m_queryResultRows.clear();
+
+    if (!m_activeProject || !m_activeProject->logicalConnections().contains(m_selectedGateway))
+    {
+        m_executionError = "Aucune passerelle logique sélectionnée.";
+        m_showQueryResultsPanel = true;
+        m_focusQueryResultsTab = true;
+        return;
+    }
+
+    const auto &gw = m_activeProject->logicalConnections().at(m_selectedGateway);
+    if (!gw.environments().contains(m_selectedContext))
+    {
+        m_executionError = "Environnement cible introuvable dans la passerelle.";
+        m_showQueryResultsPanel = true;
+        m_focusQueryResultsTab = true;
+        return;
+    }
+
+    const auto &phys = gw.environments().at(m_selectedContext);
+    cppsqlx::Connection conn(phys.toConnectionString());
+    auto connRes = conn.connect();
+    if (!connRes.has_value())
+    {
+        m_executionError = "Échec de connexion PostgreSQL : " + connRes.error();
+        addConsoleLog(m_executionError, LogLevel::Error);
+        m_showQueryResultsPanel = true;
+        m_focusQueryResultsTab = true;
+        return;
+    }
+
+    addConsoleLog("Exécution SQL directe : " + sqlText, LogLevel::Info);
+
+    PGresult *res = PQexec(conn.get(), sqlText.c_str());
+    ExecStatusType status = PQresultStatus(res);
+
+    if (status == PGRES_TUPLES_OK)
+    {
+        int nFields = PQnfields(res);
+        int nTuples = PQntuples(res);
+
+        m_queryResultHeaders.reserve(nFields);
+        for (int c = 0; c < nFields; ++c)
+        {
+            m_queryResultHeaders.push_back(PQfname(res, c));
+        }
+
+        m_queryResultRows.reserve(nTuples);
+        for (int r = 0; r < nTuples; ++r)
+        {
+            std::vector<std::string> row;
+            row.reserve(nFields);
+            for (int c = 0; c < nFields; ++c)
+            {
+                if (PQgetisnull(res, r, c))
+                    row.push_back("NULL");
+                else
+                    row.push_back(PQgetvalue(res, r, c));
+            }
+            m_queryResultRows.push_back(std::move(row));
+        }
+
+        addConsoleLog("Requête exécutée avec succès (" + std::to_string(nTuples) + " ligne(s)).", LogLevel::Success);
+    }
+    else if (status == PGRES_COMMAND_OK)
+    {
+        std::string affected = PQcmdTuples(res);
+        m_queryResultHeaders = {"Statut", "Lignes affectées"};
+        m_queryResultRows = {{"OK", affected.empty() ? "0" : affected}};
+        addConsoleLog("Commande SQL exécutée avec succès (" + (affected.empty() ? "0" : affected) + " ligne(s) affectée(s)).", LogLevel::Success);
+    }
+    else
+    {
+        m_executionError = PQerrorMessage(conn.get());
+        addConsoleLog("Erreur SQL : " + m_executionError, LogLevel::Error);
+    }
+
+    PQclear(res);
+
+    // Bascule automatiquement sur l'onglet de résultats dans le dock inférieur
+    m_showQueryResultsPanel = true;
+    m_focusQueryResultsTab = true;
+}
+
+void Application::renderQueryTextEditor()
+{
+    ImGui::Spacing();
+
+    bool hasConnection = (m_activeProject &&
+                          m_activeProject->logicalConnections().contains(m_selectedGateway) &&
+                          m_activeProject->logicalConnections().at(m_selectedGateway).environments().contains(m_selectedContext));
+    bool hasSql = (strlen(m_rawSqlEditorBuf.data()) > 0);
+
+    if (!hasConnection || !hasSql)
+        ImGui::BeginDisabled();
+
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.58f, 0.30f, 0.90f));
+    if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Exécuter SQL (Ctrl+Entrée)").c_str(), ImVec2(220.0f, 28.0f)))
+    {
+        executeRawSqlQuery(std::string(m_rawSqlEditorBuf.data()));
+    }
+    ImGui::PopStyleColor();
+
+    if (!hasConnection || !hasSql)
+        ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button((std::string(ICON_LC_TRASH) + "  Effacer").c_str(), ImVec2(100.0f, 28.0f)))
+    {
+        m_rawSqlEditorBuf.fill('\0');
+        m_showSqlAutocomplete = false;
+    }
+
+    ImGui::SameLine();
+    if (!hasSql)
+        ImGui::BeginDisabled();
+    if (ImGui::Button((std::string(ICON_LC_ALIGN_LEFT) + "  Formater").c_str(), ImVec2(115.0f, 28.0f)))
+    {
+        std::string formatted = formatRawSqlQuery(std::string(m_rawSqlEditorBuf.data()));
+        snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", formatted.c_str());
+    }
+    if (!hasSql)
+        ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button((std::string(ICON_LC_COPY) + "  Copier depuis le Designer").c_str(), ImVec2(215.0f, 28.0f)))
+    {
+        std::string compiled = compileVisualGraphToSelectQuery().toSQL();
+        snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", compiled.c_str());
+    }
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("  |  Cible : %s [%s]  |  Autocomplétion : Ctrl+Espace",
+                        m_selectedGateway.empty() ? "Aucune" : m_selectedGateway.c_str(),
+                        m_selectedContext.empty() ? "Aucun" : m_selectedContext.c_str());
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Zone d'édition plein écran
+    ImVec2 availSize = ImGui::GetContentRegionAvail();
+    if (availSize.y < 100.0f)
+        availSize.y = 100.0f;
+
+    int prevCursorPos = m_sqlEditorCursorPos;
+    SqlEditorCallbackUserData cbData{
+        &m_sqlEditorCursorPos,
+        &m_sqlPendingInsertion,
+        m_sqlReplaceStartPos,
+        m_sqlReplaceEndPos};
+
+    ImGuiInputTextFlags editorFlags = ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackAlways;
+
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    bool textModified = ImGui::InputTextMultiline(
+        "##RawSqlTextEditor",
+        m_rawSqlEditorBuf.data(),
+        m_rawSqlEditorBuf.size(),
+        availSize,
+        editorFlags,
+        sqlTextEditorCallback,
+        &cbData);
+    ImGui::PopStyleColor();
+
+    bool isEditorFocused = ImGui::IsItemFocused();
+
+    // Raccourci Ctrl + Entrée pour exécuter
+    if (isEditorFocused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Enter, false))
+    {
+        if (hasConnection && hasSql)
+        {
+            m_showSqlAutocomplete = false;
+            executeRawSqlQuery(std::string(m_rawSqlEditorBuf.data()));
+        }
+    }
+
+    // Raccourci Ctrl + Espace pour ouvrir manuellement l'autocomplétion
+    if (isEditorFocused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Space, false))
+    {
+        m_showSqlAutocomplete = true;
+        m_sqlAutocompleteSelectedIdx = 0;
+    }
+
+    // Déclenchement automatique dès que l'utilisateur tape un caractère ou un point
+    if (textModified && isEditorFocused)
+    {
+        m_showSqlAutocomplete = true;
+        m_sqlAutocompleteSelectedIdx = 0;
+    }
+
+    // Superposition de la coloration syntaxique
+    ImVec2 editorMin = ImGui::GetItemRectMin();
+    ImVec2 editorMax = ImGui::GetItemRectMax();
+    ImVec2 framePad = ImGui::GetStyle().FramePadding;
+
+    float scrollX = 0.0f;
+    float scrollY = 0.0f;
+    if (ImGuiWindow *childWin = ImGui::FindWindowByName("##RawSqlTextEditor"))
+    {
+        scrollX = childWin->Scroll.x;
+        scrollY = childWin->Scroll.y;
+    }
+
+    ImVec2 textStartPos(editorMin.x + framePad.x - scrollX, editorMin.y + framePad.y - scrollY);
+    ImDrawList *drawList = ImGui::GetWindowDrawList();
+
+    drawList->PushClipRect(
+        ImVec2(editorMin.x + framePad.x, editorMin.y + framePad.y),
+        ImVec2(editorMax.x - framePad.x, editorMax.y - framePad.y),
+        true);
+    renderSqlSyntaxHighlightOverlay(drawList, textStartPos, m_rawSqlEditorBuf.data(), ImGui::GetFont(), ImGui::GetFontSize());
+    drawList->PopClipRect();
+
+    // =========================================================================
+    // LOGIQUE D'ANALYSE CONTEXTUELLE ET POPUP D'AUTOCOMPLÉTION
+    // =========================================================================
+    if (m_showSqlAutocomplete)
+    {
+        std::string fullText(m_rawSqlEditorBuf.data());
+        int cursor = std::max(0, std::min(m_sqlEditorCursorPos, static_cast<int>(fullText.size())));
+
+        // Extraction du jeton avant le curseur (ex: "emp.mat" -> qualifier="emp", prefix="mat")
+        int tokenStart = cursor;
+        while (tokenStart > 0 && (std::isalnum(static_cast<unsigned char>(fullText[tokenStart - 1])) ||
+                                  fullText[tokenStart - 1] == '_' || fullText[tokenStart - 1] == '.'))
+        {
+            --tokenStart;
+        }
+
+        std::string currentToken = fullText.substr(tokenStart, cursor - tokenStart);
+        std::string qualifier = "";
+        std::string prefix = currentToken;
+        int replaceStart = tokenStart;
+
+        size_t dotPos = currentToken.find_last_of('.');
+        if (dotPos != std::string::npos)
+        {
+            qualifier = currentToken.substr(0, dotPos);
+            prefix = currentToken.substr(dotPos + 1);
+            replaceStart = tokenStart + static_cast<int>(dotPos) + 1;
+        }
+
+        auto toLower = [](const std::string &s)
+        {
+            std::string low = s;
+            for (char &c : low)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return low;
+        };
+
+        std::string lowPrefix = toLower(prefix);
+        std::string lowQual = toLower(qualifier);
+
+        // Si aucun point et préfixe vide (sauf ouverture manuelle Ctrl+Espace), on ferme
+        if (dotPos == std::string::npos && prefix.empty() && !(ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Space, false)))
+        {
+            m_showSqlAutocomplete = false;
+        }
+        else
+        {
+            // Résolution des alias présents dans la requête SQL (ex: "t_employes AS emp" -> emp => t_employes)
+            std::string resolvedSourceName = qualifier;
+            if (!qualifier.empty())
+            {
+                std::istringstream iss(fullText);
+                std::vector<std::string> words;
+                std::string w;
+                while (iss >> w)
+                {
+                    // Nettoyage ponctuation basique
+                    while (!w.empty() && (w.back() == ',' || w.back() == ')' || w.back() == ';'))
+                        w.pop_back();
+                    words.push_back(w);
+                }
+
+                for (size_t i = 0; i + 1 < words.size(); ++i)
+                {
+                    if (toLower(words[i]) == "as" && i > 0 && toLower(words[i + 1]) == lowQual)
+                    {
+                        resolvedSourceName = words[i - 1];
+                        break;
+                    }
+                    if (i + 1 < words.size() && toLower(words[i + 1]) == lowQual &&
+                        toLower(words[i]) != "from" && toLower(words[i]) != "join" && toLower(words[i]) != "select")
+                    {
+                        resolvedSourceName = words[i];
+                        break;
+                    }
+                }
+            }
+
+            // Suppression éventuelle du schéma "public." dans resolvedSourceName
+            std::string shortSourceName = resolvedSourceName;
+            size_t schemaDot = shortSourceName.find_last_of('.');
+            if (schemaDot != std::string::npos)
+                shortSourceName = shortSourceName.substr(schemaDot + 1);
+
+            std::vector<SqlCompletionCandidate> candidates;
+
+            // Cas A : Un qualificateur est tapé (ex: "t_employes." ou "emp.") -> Colonnes de cette source uniquement
+            if (!qualifier.empty())
+            {
+                // 1. Recherche dans les Tables physiques
+                if (m_activeProject)
+                {
+                    for (const auto &[dsName, dsObj] : m_activeProject->datasets())
+                    {
+                        if (toLower(dsName) == toLower(resolvedSourceName) || toLower(dsName) == toLower(shortSourceName))
+                        {
+                            for (const auto &[idx, col] : dsObj.columns())
+                            {
+                                if (lowPrefix.empty() || toLower(col.name()).find(lowPrefix) != std::string::npos)
+                                {
+                                    candidates.push_back({col.name(), dsName + " (" + col.type() + ")", false});
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Recherche dans les Requêtes enregistrées (CTE)
+                for (const auto &sq : m_savedQueries)
+                {
+                    if (toLower(sq.name) == toLower(resolvedSourceName))
+                    {
+                        for (const auto &col : sq.outputSchema)
+                        {
+                            if (lowPrefix.empty() || toLower(col.name).find(lowPrefix) != std::string::npos)
+                            {
+                                candidates.push_back({col.name, "CTE " + sq.name + " (" + col.dataType + ")", false});
+                            }
+                        }
+                    }
+                }
+            }
+            // Cas B : Pas de point -> Tables, CTE et Colonnes correspondantes
+            else
+            {
+                if (m_activeProject)
+                {
+                    for (const auto &[dsName, dsObj] : m_activeProject->datasets())
+                    {
+                        if (lowPrefix.empty() || toLower(dsName).find(lowPrefix) != std::string::npos)
+                        {
+                            candidates.push_back({dsName, "Table", true});
+                        }
+                        for (const auto &[idx, col] : dsObj.columns())
+                        {
+                            if (!lowPrefix.empty() && toLower(col.name()).find(lowPrefix) != std::string::npos)
+                            {
+                                candidates.push_back({col.name(), dsName + " (" + col.type() + ")", false});
+                            }
+                        }
+                    }
+                }
+                for (const auto &sq : m_savedQueries)
+                {
+                    if (lowPrefix.empty() || toLower(sq.name).find(lowPrefix) != std::string::npos)
+                    {
+                        candidates.push_back({sq.name, "CTE / Requête", true});
+                    }
+                }
+            }
+            if (candidates.empty())
+            {
+                m_showSqlAutocomplete = false;
+            }
+            else
+            {
+                int totalCandidates = static_cast<int>(candidates.size());
+                if (m_sqlAutocompleteSelectedIdx >= totalCandidates)
+                    m_sqlAutocompleteSelectedIdx = 0;
+
+                // Calcul de la position écran du curseur texte pour ancrer le popup juste dessous
+                std::string textBeforeCursor = fullText.substr(0, cursor);
+                int lineCount = 0;
+                size_t lastNewline = textBeforeCursor.find_last_of('\n');
+                for (char c : textBeforeCursor)
+                {
+                    if (c == '\n')
+                        ++lineCount;
+                }
+                std::string currentLineText = (lastNewline == std::string::npos)
+                                                  ? textBeforeCursor
+                                                  : textBeforeCursor.substr(lastNewline + 1);
+
+                float cursorOffsetX = ImGui::CalcTextSize(currentLineText.c_str()).x;
+                float cursorOffsetY = (lineCount + 1) * ImGui::GetTextLineHeight();
+
+                ImVec2 popupPos(textStartPos.x + cursorOffsetX, textStartPos.y + cursorOffsetY + 4.0f);
+                ImGui::SetNextWindowPos(popupPos, ImGuiCond_Always);
+                ImGui::SetNextWindowSize(ImVec2(340.0f, std::min(190.0f, totalCandidates * 24.0f + 16.0f)));
+
+                ImGuiWindowFlags popupFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                              ImGuiWindowFlags_NoFocusOnAppearing;
+
+                if (ImGui::Begin("##SqlAutocompletePopup", nullptr, popupFlags))
+                {
+                    // Navigation clavier Haut / Bas / Échap / Validation par Entrée
+                    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+                        m_sqlAutocompleteSelectedIdx = (m_sqlAutocompleteSelectedIdx + 1) % totalCandidates;
+                    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+                        m_sqlAutocompleteSelectedIdx = (m_sqlAutocompleteSelectedIdx - 1 + totalCandidates) % totalCandidates;
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+                        m_showSqlAutocomplete = false;
+
+                    bool acceptCurrent = (!ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Enter, false));
+
+                    for (int idx = 0; idx < totalCandidates; ++idx)
+                    {
+                        const auto &cand = candidates[idx];
+                        bool isSel = (idx == m_sqlAutocompleteSelectedIdx);
+
+                        ImGui::PushID(idx);
+                        const char *icon = cand.isTableOrCte ? ICON_LC_DATABASE : ICON_LC_COLUMNS;
+                        ImVec4 iconCol = cand.isTableOrCte ? ImVec4(0.35f, 0.75f, 1.0f, 1.0f) : ImVec4(0.45f, 0.85f, 0.55f, 1.0f);
+
+                        ImGui::TextColored(iconCol, "%s", icon);
+                        ImGui::SameLine();
+
+                        if (ImGui::Selectable(cand.label.c_str(), isSel, ImGuiSelectableFlags_AllowDoubleClick) || (isSel && acceptCurrent))
+                        {
+                            m_sqlPendingInsertion = cand.label;
+                            m_sqlReplaceStartPos = replaceStart;
+                            m_sqlReplaceEndPos = cursor;
+                            m_showSqlAutocomplete = false;
+                        }
+
+                        if (isSel)
+                            ImGui::SetScrollHereY();
+
+                        ImGui::SameLine(190.0f);
+                        ImGui::TextDisabled("%s", cand.detail.c_str());
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::End();
+            }
+        }
+    }
+}

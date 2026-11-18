@@ -232,7 +232,8 @@ private:
     void renderQueryResultsPanel();
     void renderTaskManagementModals();
     void renderQueryInspectAndDeleteModals();
-
+    void renderQueryTextEditor();
+    void executeRawSqlQuery(const std::string &sqlText);
 
     // =========================================================================
     // 3. MÉTHODES MÉTIER, COMPILATION ET PERSISTANCE
@@ -430,9 +431,26 @@ private:
     std::vector<TaskStepUnit> m_editTaskUnits;
 
     // Gestion contextuelle des Requêtes Enregistrées
-bool m_showInspectQueryModal = false;
-bool m_showDeleteQueryModal = false;
-int m_inspectingQueryIndex = -1;
-int m_deletingQueryIndex = -1;
+    bool m_showInspectQueryModal = false;
+    bool m_showDeleteQueryModal = false;
+    int m_inspectingQueryIndex = -1;
+    int m_deletingQueryIndex = -1;
+
+    std::array<char, 32768> m_rawSqlEditorBuf{};
+
+    // Autocomplétion dans l'éditeur SQL texte
+    struct SqlCompletionCandidate
+    {
+        std::string label;      // Texte inséré (ex: "t_employes" ou "matricule")
+        std::string detail;     // Type ou provenance (ex: "Table", "CTE", "t_employes (varchar)")
+        bool isTableOrCte = false;
+    };
+
+    int m_sqlEditorCursorPos = 0;
+    bool m_showSqlAutocomplete = false;
+    int m_sqlAutocompleteSelectedIdx = 0;
+    std::string m_sqlPendingInsertion = "";
+    int m_sqlReplaceStartPos = 0;
+    int m_sqlReplaceEndPos = 0;
 
 };
