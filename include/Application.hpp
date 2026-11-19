@@ -87,6 +87,9 @@ private:
         {
             return leftFieldName + " " + std::string(cppsqlx::toSQL(op)) + " " + rightFieldName;
         }
+
+        bool isSetOperation = false;
+        cppsqlx::SetOperator setOp = cppsqlx::SetOperator::UNION_ALL;
     };
 
     struct VisualQueryPredicate
@@ -255,8 +258,7 @@ private:
         std::vector<CteChainStep> &outSteps,
         int currentDepth = 0) const;
 
-    void renderUnionBuilderEditor();
-    cppsqlx::SelectQuery compileUnionBuilderToSelectQuery() const;
+
 
 
 
@@ -493,22 +495,5 @@ private:
     std::string m_pendingCtePreviewName = "";
 
     bool m_cteStackHorizontal = true;
-
-    // État de l'Assembleur Ensembliste (UNION ALL, UNION, INTERSECT, EXCEPT)
-    struct UnionBranchItem
-    {
-        std::string queryName;
-        cppsqlx::SetOperator opFromPrevious = cppsqlx::SetOperator::UNION_ALL;
-    };
-
-    std::vector<UnionBranchItem> m_unionBranches;
-    std::array<char, 128> m_unionOrderByColBuf{};
-    bool m_unionOrderByDesc = false;
-    int m_unionLimitValue = 0; // 0 = aucune limite
-    std::array<char, 128> m_unionSaveNameBuf{};
-    std::array<char, 256> m_unionSaveDescBuf{};
-
-
-
 
 };

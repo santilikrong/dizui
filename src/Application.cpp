@@ -625,6 +625,161 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
     ed::SetCurrentEditor(m_queryContext);
 
     // =========================================================================
+    // Cas spécial : Graphe d'assemblage Ensembliste (UNION ALL / UNION / etc.)
+    // =========================================================================
+    bool hasUnionLinks = std::any_of(m_visualQueryLinks.begin(), m_visualQueryLinks.end(),
+                                     [](const VisualQueryLink &l) { return l.isSetOperation; });
+
+    if (hasUnionLinks)
+    {
+        auto loadCteSelectQuery = [&](const std::string &cteName) -> std::optional<cppsqlx::SelectQuery>
+        {
+            for (const auto &sq : m_savedQueries)
+            {
+                if (sq.name == cteName && !sq.compiledSelectJson.is_null() && !sq.compiledSelectJson.empty())
+                {
+                    auto res = cppsqlx::SelectQuery::fromJSON(sq.compiledSelectJson);
+                    if (res.has_value())
+                        return *res;
+                }
+            }
+            return std::nullopt;
+        };
+
+        const auto &firstNode = m_visualQueryNodes[0];
+        auto rootOpt = loadCteSelectQuery(firstNode.datasetName);
+        if (rootOpt.has_value())
+        {
+            query = std::move(*rootOpt);
+
+            // Récupère les en-têtes depuis le schéma de la première CTE
+            for (const auto &sq : m_savedQueries)
+            {
+                if (sq.name == firstNode.datasetName)
+                {
+                    for (const auto &col : sq.outputSchema)
+                        local_select_headers.push_back(col.name);
+                    break;
+                }
+            }
+            m_queryResultHeaders = local_select_headers;
+
+            std::set<uintptr_t> unionedIds{firstNode.id};
+            for (const auto &link : m_visualQueryLinks)
+            {
+                if (!link.isSetOperation)
+                    continue;
+
+                uintptr_t sId = link.startPinId / 1000;
+                uintptr_t dId = link.endPinId / 1000;
+                uintptr_t nextId = unionedIds.contains(sId) ? dId : sId;
+                if (unionedIds.contains(nextId))
+                    continue;
+
+                for (const auto &n : m_visualQueryNodes)
+                {
+                    if (n.id == nextId && n.isCTE)
+                    {
+                        if (auto branchOpt = loadCteSelectQuery(n.datasetName))
+                        {
+                            if (link.setOp == cppsqlx::SetOperator::UNION_ALL)
+                                query.unionAll(*branchOpt);
+                            else if (link.setOp == cppsqlx::SetOperator::UNION)
+                                query.unionDistinct(*branchOpt);
+                            else if (link.setOp == cppsqlx::SetOperator::INTERSECT)
+                                query.intersect(*branchOpt);
+                            else if (link.setOp == cppsqlx::SetOperator::EXCEPT)
+                                query.except(*branchOpt);
+
+                            unionedIds.insert(nextId);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        return query;
+    }
+
+
+    // =========================================================================
+    // Cas spécial : Graphe d'assemblage Ensembliste (UNION ALL / UNION / etc.)
+    // =========================================================================
+
+    if (hasUnionLinks)
+    {
+        auto loadCteSelectQuery = [&](const std::string &cteName) -> std::optional<cppsqlx::SelectQuery>
+        {
+            for (const auto &sq : m_savedQueries)
+            {
+                if (sq.name == cteName && !sq.compiledSelectJson.is_null() && !sq.compiledSelectJson.empty())
+                {
+                    auto res = cppsqlx::SelectQuery::fromJSON(sq.compiledSelectJson);
+                    if (res.has_value())
+                        return *res;
+                }
+            }
+            return std::nullopt;
+        };
+
+        const auto &firstNode = m_visualQueryNodes[0];
+        auto rootOpt = loadCteSelectQuery(firstNode.datasetName);
+        if (rootOpt.has_value())
+        {
+            query = std::move(*rootOpt);
+
+            // Récupère les en-têtes depuis le schéma de la première CTE
+            for (const auto &sq : m_savedQueries)
+            {
+                if (sq.name == firstNode.datasetName)
+                {
+                    for (const auto &col : sq.outputSchema)
+                        local_select_headers.push_back(col.name);
+                    break;
+                }
+            }
+            m_queryResultHeaders = local_select_headers;
+
+            std::set<uintptr_t> unionedIds{firstNode.id};
+            for (const auto &link : m_visualQueryLinks)
+            {
+                if (!link.isSetOperation)
+                    continue;
+
+                uintptr_t sId = link.startPinId / 1000;
+                uintptr_t dId = link.endPinId / 1000;
+                uintptr_t nextId = unionedIds.contains(sId) ? dId : sId;
+                if (unionedIds.contains(nextId))
+                    continue;
+
+                for (const auto &n : m_visualQueryNodes)
+                {
+                    if (n.id == nextId && n.isCTE)
+                    {
+                        if (auto branchOpt = loadCteSelectQuery(n.datasetName))
+                        {
+                            if (link.setOp == cppsqlx::SetOperator::UNION_ALL)
+                                query.unionAll(*branchOpt);
+                            else if (link.setOp == cppsqlx::SetOperator::UNION)
+                                query.unionDistinct(*branchOpt);
+                            else if (link.setOp == cppsqlx::SetOperator::INTERSECT)
+                                query.intersect(*branchOpt);
+                            else if (link.setOp == cppsqlx::SetOperator::EXCEPT)
+                                query.except(*branchOpt);
+
+                            unionedIds.insert(nextId);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        ed::SetCurrentEditor(nullptr);
+        return query;
+    }
+
+    // =========================================================================
     // Étape 0 : Collecte et déclaration des CTE (WITH nom_requete AS (...))
     // =========================================================================
     std::set<std::string> registeredCteNames;
@@ -654,7 +809,6 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
     {
         if (node.isCTE)
         {
-            // Une CTE est interrogée par son nom dans la clause FROM / JOIN (sans préfixe de schéma)
             cppsqlx::Dataset cteDs(node.datasetName);
             return std::make_shared<cppsqlx::Dataset>(std::move(cteDs));
         }
@@ -681,7 +835,6 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
 
             std::string finalSqlExpr = item.sqlExpression;
 
-            // Résolution dynamique de l'alias actuel du nœud si la colonne n'est pas une formule libre
             if (!item.isCustomExpression && item.sourceNodeId != 0)
             {
                 for (const auto &node : m_visualQueryNodes)
@@ -715,7 +868,6 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
     }
     else
     {
-        // Rétrocompatibilité avec les anciennes requêtes sans m_projectionItems
         for (const auto &node : m_visualQueryNodes)
         {
             if (!node.isCTE && m_activeProject->datasets().contains(node.datasetName))
@@ -764,6 +916,9 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
 
     for (const auto &link : m_visualQueryLinks)
     {
+        if (link.isSetOperation)
+            continue;
+
         uintptr_t src_node_id = link.startPinId / 1000;
         uintptr_t dst_node_id = link.endPinId / 1000;
 
@@ -792,14 +947,11 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
         std::string live_left_field = link.leftFieldName;
         if (auto dot = live_left_field.find('.'); dot != std::string::npos)
             live_left_field = srcNode->alias + "." + live_left_field.substr(dot + 1);
-
         std::string live_right_field = link.rightFieldName;
         if (auto dot = live_right_field.find('.'); dot != std::string::npos)
             live_right_field = dstNode->alias + "." + live_right_field.substr(dot + 1);
-
         cppsqlx::SQLExpression left_expr = operator""_col(live_left_field.c_str(), live_left_field.length());
         cppsqlx::SQLExpression right_expr = operator""_col(live_right_field.c_str(), live_right_field.length());
-
         cppsqlx::SQLExpression on_expr;
         if (link.op == cppsqlx::SQLOperator::Equal)
             on_expr = left_expr.equal(right_expr);
@@ -815,7 +967,6 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
             on_expr = left_expr.lessOrEqual(right_expr);
         else
             on_expr = left_expr.equal(right_expr);
-
         std::string joinTypeStr = "INNER JOIN";
         if (link.type == cppsqlx::JoinType::LEFT)
             joinTypeStr = "LEFT JOIN";
@@ -823,21 +974,17 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
             joinTypeStr = "RIGHT JOIN";
         else if (link.type == cppsqlx::JoinType::FULL)
             joinTypeStr = "FULL JOIN";
-
         std::string targetAlias = targetNode->alias.empty() ? targetNode->datasetName : targetNode->alias;
         query.join(joinTypeStr, targetDsPtr, targetAlias, on_expr);
         joinedNodeIds.insert(targetNode->id);
     }
-
     // =========================================================================
     // Étape D : Clause WHERE (Prédicats simples ET Expressions SQL avancées)
     // =========================================================================
     std::string combinedWhereSql = "";
-
     for (const auto &pred : m_visualQueryPredicates)
     {
         std::string singlePredSql = "";
-
         if (pred.isCustomExpression && !pred.customSqlCondition.empty())
         {
             singlePredSql = pred.customSqlCondition;
@@ -846,7 +993,6 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
         {
             uintptr_t table_node_id = pred.connectedSrcPinId / 1000;
             std::string live_pred_column = pred.targetColumn;
-
             for (const auto &n : m_visualQueryNodes)
             {
                 if (n.id == table_node_id)
@@ -854,13 +1000,10 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
                     std::string raw_col = pred.targetColumn;
                     if (auto dot = raw_col.find('.'); dot != std::string::npos)
                         raw_col = raw_col.substr(dot + 1);
-
                     live_pred_column = n.alias + "." + raw_col;
                 }
             }
-
             cppsqlx::SQLExpression col_expr = operator""_col(live_pred_column.c_str(), live_pred_column.length());
-
             cppsqlx::SQLExpression val_expr;
             try
             {
@@ -1353,10 +1496,14 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
             float jy = lJson.value("joinY", 0.0f);
             ed::SetNodePosition(link.centralNodeId, ImVec2(jx, jy));
 
+            link.isSetOperation = lJson.value("isSetOperation", false);
+            link.setOp = static_cast<cppsqlx::SetOperator>(lJson.value("setOp", static_cast<int>(cppsqlx::SetOperator::UNION_ALL)));
+
             m_visualQueryLinks.push_back(std::move(link));
         }
         ed::SetCurrentEditor(nullptr);
     }
+
 
 
     // 4. Restauration des filtres (VisualQueryPredicate)
@@ -2777,16 +2924,6 @@ void Application::renderMainContentZone()
             renderCteStackEditor();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem((std::string(ICON_LC_GIT_MERGE) + "  Assembleur UNION").c_str()))
-        {
-            isQueryVisualActive = true;
-            if (ImGui::IsItemActivated())
-            {
-                m_focusQueryResultsTab = true;
-            }
-            renderUnionBuilderEditor();
-            ImGui::EndTabItem();
-        }
 
         ImGui::EndTabBar();
     }
@@ -3882,9 +4019,12 @@ void Application::renderQueryEditor()
                     {"rightFieldName", l.rightFieldName},
                     {"op", static_cast<int>(l.op)},
                     {"joinX", joinPos.x},
-                    {"joinY", joinPos.y}
+                    {"joinY", joinPos.y},
+                    {"isSetOperation", l.isSetOperation},
+                    {"setOp", static_cast<int>(l.setOp)}
                 });
             }
+
 
             // 2c. Filtres (WHERE)
             vState["predicates"] = nlohmann::json::array();
@@ -4365,21 +4505,30 @@ void Application::renderCanvasJoinNodes()
             std::string join_label = "INNER JOIN";
             ImVec4 icon_color = ImVec4(0.25f, 0.75f, 0.45f, 1.0f);
 
-            if (link.type == cppsqlx::JoinType::LEFT)
+            if (link.isSetOperation)
             {
-                join_label = "LEFT JOIN";
-                icon_color = ImVec4(0.40f, 0.80f, 0.40f, 1.0f);
+                join_label = cppsqlx::toString(link.setOp); // "UNION ALL", "UNION", etc.
+                icon_color = ImVec4(0.75f, 0.45f, 0.95f, 1.0f); // Violet distinctif
             }
-            if (link.type == cppsqlx::JoinType::RIGHT)
+            else
             {
-                join_label = "RIGHT JOIN";
-                icon_color = ImVec4(0.85f, 0.65f, 0.20f, 1.0f);
+                if (link.type == cppsqlx::JoinType::LEFT)
+                {
+                    join_label = "LEFT JOIN";
+                    icon_color = ImVec4(0.40f, 0.80f, 0.40f, 1.0f);
+                }
+                else if (link.type == cppsqlx::JoinType::RIGHT)
+                {
+                    join_label = "RIGHT JOIN";
+                    icon_color = ImVec4(0.85f, 0.65f, 0.20f, 1.0f);
+                }
+                else if (link.type == cppsqlx::JoinType::FULL)
+                {
+                    join_label = "FULL JOIN";
+                    icon_color = ImVec4(0.90f, 0.40f, 0.90f, 1.0f);
+                }
             }
-            if (link.type == cppsqlx::JoinType::FULL)
-            {
-                join_label = "FULL JOIN";
-                icon_color = ImVec4(0.90f, 0.40f, 0.90f, 1.0f);
-            }
+
 
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(icon_color.x, icon_color.y, icon_color.z, 0.20f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(icon_color.x, icon_color.y, icon_color.z, 0.40f));
@@ -4407,7 +4556,22 @@ void Application::renderCanvasJoinNodes()
             if (auto dot_pos = right_pure.find('.'); dot_pos != std::string::npos)
                 right_pure = right_pure.substr(dot_pos + 1);
             std::string op_symbol = std::string(cppsqlx::toSQL(link.op));
-            std::string display_expr = src_alias + "." + left_pure + " " + op_symbol + " " + dst_alias + "." + right_pure;
+            std::string display_expr;
+            if (link.isSetOperation)
+            {
+                display_expr = src_alias + " " + join_label + " " + dst_alias;
+            }
+            else
+            {
+                std::string left_pure = link.leftFieldName;
+                if (auto dot_pos = left_pure.find('.'); dot_pos != std::string::npos)
+                    left_pure = left_pure.substr(dot_pos + 1);
+                std::string right_pure = link.rightFieldName;
+                if (auto dot_pos = right_pure.find('.'); dot_pos != std::string::npos)
+                    right_pure = right_pure.substr(dot_pos + 1);
+                std::string op_symbol = std::string(cppsqlx::toSQL(link.op));
+                display_expr = src_alias + "." + left_pure + " " + op_symbol + " " + dst_alias + "." + right_pure;
+            }
 
             if (display_expr.length() > 24)
                 display_expr = display_expr.substr(0, 21) + "...";
@@ -4416,6 +4580,7 @@ void Application::renderCanvasJoinNodes()
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (140.0f - text_width) * 0.5f);
             ImGui::TextDisabled("%s", display_expr.c_str());
             ImGui::EndGroup();
+
 
             // Superposition logique des Pins pour l'effet de câble continu traversant
             ImGui::SetCursorPos(ImVec2(local_cursor.x + 70.0f, local_cursor.y + 12.0f));
@@ -4630,99 +4795,163 @@ void Application::renderQueryModals()
     }
     if (ImGui::BeginPopupModal("Éditeur de Clause de Jointure", &m_showJoinModal, ImGuiWindowFlags_None))
     {
-        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Configuration de l'Opérateur JOIN", ICON_LC_SETTINGS);
-        ImGui::Separator();
-        ImGui::Spacing();
-        ImGui::TextDisabled("1. TYPE DE JOINTURE");
-        int current_type = (int)m_editingJoinLink->type;
-        ImGui::RadioButton("INNER JOIN (Intersection)", &current_type, (int)cppsqlx::JoinType::INNER);
-        ImGui::RadioButton("LEFT JOIN (Priorité Table Gauche)", &current_type, (int)cppsqlx::JoinType::LEFT);
-        ImGui::RadioButton("RIGHT JOIN (Priorité Table Droite)", &current_type, (int)cppsqlx::JoinType::RIGHT);
-        ImGui::RadioButton("FULL JOIN (Union Complète)", &current_type, (int)cppsqlx::JoinType::FULL);
-        m_editingJoinLink->type = (cppsqlx::JoinType)current_type;
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        ImGui::TextDisabled("2. CONDITION DE JOINTURE STRUCTUREE (SQLJoinExpression)");
-        ImGui::Spacing();
-
         uintptr_t s_node = m_editingJoinLink->startPinId / 1000;
         uintptr_t d_node = m_editingJoinLink->endPinId / 1000;
         std::string current_src_alias = "";
         std::string current_dst_alias = "";
+        bool src_is_cte = false;
+        bool dst_is_cte = false;
+
         for (const auto &n : m_visualQueryNodes)
         {
             if (n.id == s_node)
+            {
                 current_src_alias = n.alias;
+                src_is_cte = n.isCTE;
+            }
             if (n.id == d_node)
+            {
                 current_dst_alias = n.alias;
+                dst_is_cte = n.isCTE;
+            }
         }
-        std::string left_col_raw = m_editingJoinLink->leftFieldName;
-        if (auto dot = left_col_raw.find('.'); dot != std::string::npos)
-            left_col_raw = left_col_raw.substr(dot + 1);
-        std::string right_col_raw = m_editingJoinLink->rightFieldName;
-        if (auto dot = right_col_raw.find('.'); dot != std::string::npos)
-            right_col_raw = right_col_raw.substr(dot + 1);
-        std::string live_left_display = current_src_alias + "." + left_col_raw;
-        std::string live_right_display = current_dst_alias + "." + right_col_raw;
 
-        if (ImGui::BeginTable("##join_expr_table", 3, ImGuiTableFlags_Resizable))
+        bool canBeSetOp = (src_is_cte && dst_is_cte);
+        if (!canBeSetOp)
         {
-            ImGui::TableSetupColumn("Champ Gauche", ImGuiTableColumnFlags_WidthStretch, 0.43f);
-            ImGui::TableSetupColumn("Op", ImGuiTableColumnFlags_WidthStretch, 0.14f);
-            ImGui::TableSetupColumn("Champ Droite", ImGuiTableColumnFlags_WidthStretch, 0.43f);
-            ImGui::TableHeadersRow();
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::BeginCombo("##left_field_combo", live_left_display.c_str()))
-            {
-                if (ImGui::Selectable(live_left_display.c_str(), true))
-                {
-                }
-                ImGui::EndCombo();
-            }
-            ImGui::TableSetColumnIndex(1);
-            ImGui::SetNextItemWidth(-1.0f);
-            std::string_view current_op_symbol = cppsqlx::toSQL(m_editingJoinLink->op);
-            if (ImGui::BeginCombo("##op_combo", current_op_symbol.data()))
-            {
-                for (auto const &item : cppsqlx::operatorMap)
-                {
-                    if (cppsqlx::isLogical(item.op))
-                        continue;
-                    if (ImGui::Selectable(item.symbol.data(), m_editingJoinLink->op == item.op))
-                    {
-                        m_editingJoinLink->op = item.op;
-                    }
-                }
-                ImGui::EndCombo();
-            }
-            ImGui::TableSetColumnIndex(2);
-            ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::BeginCombo("##right_field_combo", live_right_display.c_str()))
-            {
-                if (ImGui::Selectable(live_right_display.c_str(), true))
-                {
-                }
-                ImGui::EndCombo();
-            }
-            ImGui::EndTable();
+            m_editingJoinLink->isSetOperation = false;
         }
-        ImGui::Spacing();
+
+        if (m_editingJoinLink->isSetOperation)
+            ImGui::TextColored(ImVec4(0.75f, 0.45f, 0.95f, 1.0f), "%s  Configuration de l'Assemblage Ensembliste (UNION)", ICON_LC_SETTINGS);
+        else
+            ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Configuration de l'Opérateur JOIN", ICON_LC_SETTINGS);
+
         ImGui::Separator();
         ImGui::Spacing();
-        float avail_x = ImGui::GetContentRegionAvail().x;
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
-        if (ImGui::Button("Enregistrer", ImVec2(120, 0)))
+
+        // Option disponible uniquement lorsque deux CTE sont reliées entre elles
+        if (canBeSetOp)
         {
-            m_editingJoinLink->leftFieldName = live_left_display;
-            m_editingJoinLink->rightFieldName = live_right_display;
-            m_showJoinModal = false;
-            ImGui::CloseCurrentPopup();
+            ImGui::Checkbox("Mode Assemblage Ensembliste (UNION ALL / UNION / INTERSECT / EXCEPT)", &m_editingJoinLink->isSetOperation);
+            ImGui::Separator();
+            ImGui::Spacing();
         }
+
+        if (m_editingJoinLink->isSetOperation)
+        {
+            ImGui::TextDisabled("1. OPÉRATEUR ENSEMBLISTE ENTRE LES DEUX REQUÊTES");
+            ImGui::Spacing();
+
+            int current_set_op = static_cast<int>(m_editingJoinLink->setOp);
+            ImGui::RadioButton("UNION ALL (Empilement complet sans dédoublonnage)", &current_set_op, static_cast<int>(cppsqlx::SetOperator::UNION_ALL));
+            ImGui::RadioButton("UNION (Empilement avec dédoublonnage DISTINCT)", &current_set_op, static_cast<int>(cppsqlx::SetOperator::UNION));
+            ImGui::RadioButton("INTERSECT (Lignes communes aux deux requêtes)", &current_set_op, static_cast<int>(cppsqlx::SetOperator::INTERSECT));
+            ImGui::RadioButton("EXCEPT (Lignes de la première absentes de la seconde)", &current_set_op, static_cast<int>(cppsqlx::SetOperator::EXCEPT));
+            m_editingJoinLink->setOp = static_cast<cppsqlx::SetOperator>(current_set_op);
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Flux assemblé : %s  %s  %s",
+                                current_src_alias.c_str(),
+                                cppsqlx::toString(m_editingJoinLink->setOp).c_str(),
+                                current_dst_alias.c_str());
+            ImGui::TextDisabled("Les deux requêtes doivent projeter le même nombre de colonnes.");
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            float avail_x = ImGui::GetContentRegionAvail().x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
+            if (ImGui::Button("Enregistrer", ImVec2(120, 0)))
+            {
+                m_showJoinModal = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        else
+        {
+            ImGui::TextDisabled("1. TYPE DE JOINTURE");
+            int current_type = (int)m_editingJoinLink->type;
+            ImGui::RadioButton("INNER JOIN (Intersection)", &current_type, (int)cppsqlx::JoinType::INNER);
+            ImGui::RadioButton("LEFT JOIN (Priorité Table Gauche)", &current_type, (int)cppsqlx::JoinType::LEFT);
+            ImGui::RadioButton("RIGHT JOIN (Priorité Table Droite)", &current_type, (int)cppsqlx::JoinType::RIGHT);
+            ImGui::RadioButton("FULL JOIN (Union Complète)", &current_type, (int)cppsqlx::JoinType::FULL);
+            m_editingJoinLink->type = (cppsqlx::JoinType)current_type;
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextDisabled("2. CONDITION DE JOINTURE STRUCTUREE (SQLJoinExpression)");
+            ImGui::Spacing();
+
+            std::string left_col_raw = m_editingJoinLink->leftFieldName;
+            if (auto dot = left_col_raw.find('.'); dot != std::string::npos)
+                left_col_raw = left_col_raw.substr(dot + 1);
+            std::string right_col_raw = m_editingJoinLink->rightFieldName;
+            if (auto dot = right_col_raw.find('.'); dot != std::string::npos)
+                right_col_raw = right_col_raw.substr(dot + 1);
+            std::string live_left_display = current_src_alias + "." + left_col_raw;
+            std::string live_right_display = current_dst_alias + "." + right_col_raw;
+
+            if (ImGui::BeginTable("##join_expr_table", 3, ImGuiTableFlags_Resizable))
+            {
+                ImGui::TableSetupColumn("Champ Gauche", ImGuiTableColumnFlags_WidthStretch, 0.43f);
+                ImGui::TableSetupColumn("Op", ImGuiTableColumnFlags_WidthStretch, 0.14f);
+                ImGui::TableSetupColumn("Champ Droite", ImGuiTableColumnFlags_WidthStretch, 0.43f);
+                ImGui::TableHeadersRow();
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::BeginCombo("##left_field_combo", live_left_display.c_str()))
+                {
+                    if (ImGui::Selectable(live_left_display.c_str(), true))
+                    {
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(-1.0f);
+                std::string_view current_op_symbol = cppsqlx::toSQL(m_editingJoinLink->op);
+                if (ImGui::BeginCombo("##op_combo", current_op_symbol.data()))
+                {
+                    for (auto const &item : cppsqlx::operatorMap)
+                    {
+                        if (cppsqlx::isLogical(item.op))
+                            continue;
+                        if (ImGui::Selectable(item.symbol.data(), m_editingJoinLink->op == item.op))
+                        {
+                            m_editingJoinLink->op = item.op;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TableSetColumnIndex(2);
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::BeginCombo("##right_field_combo", live_right_display.c_str()))
+                {
+                    if (ImGui::Selectable(live_right_display.c_str(), true))
+                    {
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::EndTable();
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            float avail_x = ImGui::GetContentRegionAvail().x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
+            if (ImGui::Button("Enregistrer", ImVec2(120, 0)))
+            {
+                m_editingJoinLink->leftFieldName = live_left_display;
+                m_editingJoinLink->rightFieldName = live_right_display;
+                m_showJoinModal = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
         ImGui::EndPopup();
     }
+
 
     // =========================================================================
     // MODALE 2 : ÉDITION DE LA CLAUSE WHERE (SIMPLE OU EXPRESSION SQL AVANCÉE)
@@ -7805,426 +8034,3 @@ void Application::renderCteStackEditor()
     }
 }
 
-
-
-cppsqlx::SelectQuery Application::compileUnionBuilderToSelectQuery() const
-{
-    cppsqlx::SelectQuery rootQuery;
-    if (m_unionBranches.empty())
-        return rootQuery;
-
-    auto findSavedQuery = [this](const std::string &name) -> const SavedQuery *
-    {
-        for (const auto &sq : m_savedQueries)
-        {
-            if (sq.name == name)
-                return &sq;
-        }
-        return nullptr;
-    };
-
-    // Reconstruction d'une branche depuis son JSON SelectQuery sauvegardé
-    auto buildBranchQuery = [&](const SavedQuery *sq) -> std::optional<cppsqlx::SelectQuery>
-    {
-        if (!sq || sq->compiledSelectJson.empty())
-            return std::nullopt;
-
-        try
-        {
-            if constexpr (std::is_same_v<std::decay_t<decltype(sq->compiledSelectJson)>, nlohmann::json>)
-            {
-                auto res = cppsqlx::SelectQuery::fromJSON(sq->compiledSelectJson);
-                if (res.has_value())
-                    return *res;
-            }
-            else
-            {
-                auto j = nlohmann::json::parse(sq->compiledSelectJson);
-                auto res = cppsqlx::SelectQuery::fromJSON(j);
-                if (res.has_value())
-                    return *res;
-            }
-        }
-        catch (...)
-        {
-        }
-        return std::nullopt;
-    };
-
-
-    const SavedQuery *firstSq = findSavedQuery(m_unionBranches[0].queryName);
-    auto firstOpt = buildBranchQuery(firstSq);
-    if (!firstOpt.has_value())
-        return rootQuery;
-
-    rootQuery = std::move(*firstOpt);
-
-    // Enchaînement des branches suivantes (UNION ALL, UNION, INTERSECT, EXCEPT)
-    for (size_t i = 1; i < m_unionBranches.size(); ++i)
-    {
-        const auto &branch = m_unionBranches[i];
-        const SavedQuery *branchSq = findSavedQuery(branch.queryName);
-        auto branchOpt = buildBranchQuery(branchSq);
-        if (!branchOpt.has_value())
-            continue;
-
-        switch (branch.opFromPrevious)
-        {
-        case cppsqlx::SetOperator::UNION_ALL:
-            rootQuery.unionAll(*branchOpt);
-            break;
-        case cppsqlx::SetOperator::UNION:
-            rootQuery.unionDistinct(*branchOpt);
-            break;
-        case cppsqlx::SetOperator::INTERSECT:
-            rootQuery.intersect(*branchOpt);
-            break;
-        case cppsqlx::SetOperator::EXCEPT:
-            rootQuery.except(*branchOpt);
-            break;
-        }
-    }
-
-    // Clauses globales post-UNION
-    std::string orderCol(m_unionOrderByColBuf.data());
-    if (!orderCol.empty())
-    {
-        rootQuery.unionOrderBy(m_unionOrderByDesc ? cppsqlx::desc(orderCol) : cppsqlx::asc(orderCol));
-    }
-    if (m_unionLimitValue > 0)
-    {
-        rootQuery.unionLimit(static_cast<size_t>(m_unionLimitValue));
-    }
-
-    return rootQuery;
-}
-
-void Application::renderUnionBuilderEditor()
-{
-    ImGui::Spacing();
-
-    bool hasConnection = (m_activeProject &&
-                          m_activeProject->logicalConnections().contains(m_selectedGateway) &&
-                          m_activeProject->logicalConnections().at(m_selectedGateway).environments().contains(m_selectedContext));
-    bool hasBranches = !m_unionBranches.empty();
-
-    // =========================================================================
-    // 1. BARRE D'OUTILS SUPÉRIEURE
-    // =========================================================================
-    if (!hasBranches || !hasConnection)
-        ImGui::BeginDisabled();
-
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.58f, 0.30f, 0.90f));
-    if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Exécuter l'assemblage").c_str(), ImVec2(195.0f, 28.0f)))
-    {
-        cppsqlx::SelectQuery compound = compileUnionBuilderToSelectQuery();
-        auto valRes = compound.validate();
-        if (!valRes.has_value())
-        {
-            addConsoleLog("Validation UNION échouée : " + valRes.error(), LogLevel::Error);
-            m_executionError = valRes.error();
-            m_showQueryResultsPanel = true;
-            m_focusQueryResultsTab = true;
-        }
-        else
-        {
-            executeRawSqlQuery(compound.toSQL());
-        }
-    }
-    ImGui::PopStyleColor();
-
-    if (!hasBranches || !hasConnection)
-        ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    if (!hasBranches)
-        ImGui::BeginDisabled();
-    if (ImGui::Button((std::string(ICON_LC_FILE_TEXT) + "  Envoyer vers Éditeur SQL").c_str(), ImVec2(205.0f, 28.0f)))
-    {
-        std::string sql = compileUnionBuilderToSelectQuery().toSQL();
-        snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", sql.c_str());
-        addConsoleLog("Requête UNION copiée dans l'éditeur SQL texte.", LogLevel::Info);
-    }
-    if (!hasBranches)
-        ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    if (!hasBranches)
-        ImGui::BeginDisabled();
-    if (ImGui::Button((std::string(ICON_LC_TRASH) + "  Vider").c_str(), ImVec2(85.0f, 28.0f)))
-    {
-        m_unionBranches.clear();
-    }
-    if (!hasBranches)
-        ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    ImGui::TextDisabled("  |  Glissez-déposez des Requêtes Enregistrées depuis l'explorateur à gauche");
-
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // =========================================================================
-    // 2. DEUX COLONNES : PILE DES BRANCHES À GAUCHE | OPTIONS & SAUVEGARDE À DROITE
-    // =========================================================================
-    float rightPanelWidth = 340.0f;
-    float leftPanelWidth = ImGui::GetContentRegionAvail().x - rightPanelWidth - ImGui::GetStyle().ItemSpacing.x;
-    if (leftPanelWidth < 300.0f)
-        leftPanelWidth = 300.0f;
-
-    // --- PANNEAU GAUCHE : PILE SÉQUENTIELLE DES REQUÊTES UNION ---
-    ImGui::BeginChild("UnionBranchesStackPanel", ImVec2(leftPanelWidth, -1.0f), true);
-
-    // Zone de réception Drag & Drop depuis l'explorateur (DND_CTE_QUERY_NODE)
-    if (ImGui::BeginDragDropTarget())
-    {
-        if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_CTE_QUERY_NODE"))
-        {
-            std::string qName(static_cast<const char *>(payload->Data));
-            m_unionBranches.push_back(UnionBranchItem{qName, cppsqlx::SetOperator::UNION_ALL});
-        }
-        ImGui::EndDragDropTarget();
-    }
-
-    // Sélecteur d'ajout rapide en haut du panneau gauche
-    if (!m_savedQueries.empty())
-    {
-        static int s_selectedQueryForUnion = 0;
-        if (s_selectedQueryForUnion >= int(m_savedQueries.size()))
-            s_selectedQueryForUnion = 0;
-
-        ImGui::SetNextItemWidth(260.0f);
-        if (ImGui::BeginCombo("##QuickAddUnionCombo", m_savedQueries[s_selectedQueryForUnion].name.c_str()))
-        {
-            for (int qIdx = 0; qIdx < int(m_savedQueries.size()); ++qIdx)
-            {
-                if (ImGui::Selectable(m_savedQueries[qIdx].name.c_str(), s_selectedQueryForUnion == qIdx))
-                    s_selectedQueryForUnion = qIdx;
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button((std::string(ICON_LC_PLUS) + "  Ajouter une branche").c_str(), ImVec2(175.0f, 0.0f)))
-        {
-            m_unionBranches.push_back(UnionBranchItem{
-                m_savedQueries[s_selectedQueryForUnion].name,
-                cppsqlx::SetOperator::UNION_ALL});
-        }
-        ImGui::Separator();
-        ImGui::Spacing();
-    }
-
-    if (m_unionBranches.empty())
-    {
-        ImGui::Spacing();
-        ImGui::TextDisabled("   Aucune branche dans l'assemblage.");
-        ImGui::TextDisabled("   Glissez-déposez au moins 2 Requêtes Enregistrées ici ou utilisez le menu '+ Ajouter une branche'.");
-    }
-    else
-    {
-        // Récupération du schéma de référence (Branche #1) pour contrôler la compatibilité
-        size_t refColCount = 0;
-        for (const auto &sq : m_savedQueries)
-        {
-            if (sq.name == m_unionBranches[0].queryName)
-            {
-                refColCount = sq.outputSchema.size();
-                break;
-            }
-        }
-
-        int moveUpIdx = -1;
-        int moveDownIdx = -1;
-        int removeIdx = -1;
-
-        for (int i = 0; i < int(m_unionBranches.size()); ++i)
-        {
-            auto &branch = m_unionBranches[i];
-            ImGui::PushID(i);
-
-            // Sélecteur d'opérateur ensembliste entre deux branches (à partir de i >= 1)
-            if (i > 0)
-            {
-                ImGui::Spacing();
-                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 40.0f);
-
-                const char *opLabels[] = {"UNION ALL", "UNION", "INTERSECT", "EXCEPT"};
-                int currentOpIdx = 0;
-                if (branch.opFromPrevious == cppsqlx::SetOperator::UNION)
-                    currentOpIdx = 1;
-                else if (branch.opFromPrevious == cppsqlx::SetOperator::INTERSECT)
-                    currentOpIdx = 2;
-                else if (branch.opFromPrevious == cppsqlx::SetOperator::EXCEPT)
-                    currentOpIdx = 3;
-
-                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.22f, 0.35f, 0.55f, 0.90f));
-                ImGui::SetNextItemWidth(145.0f);
-                if (ImGui::Combo("##SetOpSelector", &currentOpIdx, opLabels, 4))
-                {
-                    if (currentOpIdx == 0)
-                        branch.opFromPrevious = cppsqlx::SetOperator::UNION_ALL;
-                    else if (currentOpIdx == 1)
-                        branch.opFromPrevious = cppsqlx::SetOperator::UNION;
-                    else if (currentOpIdx == 2)
-                        branch.opFromPrevious = cppsqlx::SetOperator::INTERSECT;
-                    else
-                        branch.opFromPrevious = cppsqlx::SetOperator::EXCEPT;
-                }
-                ImGui::PopStyleColor();
-                ImGui::Spacing();
-            }
-
-            // Recherche des métadonnées de la requête de cette branche
-            const SavedQuery *sqRef = nullptr;
-            for (const auto &sq : m_savedQueries)
-            {
-                if (sq.name == branch.queryName)
-                {
-                    sqRef = &sq;
-                    break;
-                }
-            }
-
-            size_t branchCols = sqRef ? sqRef->outputSchema.size() : 0;
-            bool schemaMismatch = (i > 0 && refColCount > 0 && branchCols > 0 && branchCols != refColCount);
-            ImVec4 cardBorder = schemaMismatch
-                                    ? ImVec4(0.95f, 0.30f, 0.30f, 0.95f)
-                                    : ImVec4(0.35f, 0.75f, 0.95f, 0.85f);
-            ImGui::PushStyleColor(ImGuiCol_Border, cardBorder);
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.5f);
-            std::string bChildId = "UnionBranchCard_" + std::to_string(i);
-            ImGui::BeginChild(bChildId.c_str(), ImVec2(-1.0f, 88.0f), true);
-            ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "%s  Branche %d : %s",
-                               ICON_LC_FILE_TEXT, i + 1, branch.queryName.c_str());
-            // Boutons Monter / Descendre / Supprimer à droite
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 85.0f);
-            if (ImGui::SmallButton(ICON_LC_ARROW_UP) && i > 0)
-                moveUpIdx = i;
-            ImGui::SameLine();
-            if (ImGui::SmallButton(ICON_LC_ARROW_DOWN) && i + 1 < int(m_unionBranches.size()))
-                moveDownIdx = i;
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
-            if (ImGui::SmallButton(ICON_LC_TRASH))
-                removeIdx = i;
-            ImGui::PopStyleColor();
-            // Aperçu horizontal des colonnes projetées par cette branche
-            if (sqRef)
-            {
-                if (schemaMismatch)
-                {
-                    ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
-                                       "Attention : %d colonne(s) (la Branche 1 en projette %d)",
-                                       int(branchCols), int(refColCount));
-                }
-                else
-                {
-                    ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.0f),
-                                       "Schéma compatible : %d colonne(s)", int(branchCols));
-                }
-                std::string colSummary;
-                for (size_t c = 0; c < sqRef->outputSchema.size(); ++c)
-                {
-                    if (c > 0)
-                        colSummary += "  |  ";
-                    colSummary += "C" + std::to_string(c + 1) + ": " + sqRef->outputSchema[c].name;
-                }
-                ImGui::TextDisabled("%s", colSummary.c_str());
-            }
-            else
-            {
-                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "Requête introuvable dans le catalogue !");
-            }
-            ImGui::EndChild();
-            ImGui::PopStyleVar(2);
-            ImGui::PopStyleColor();
-            ImGui::PopID();
-        }
-        if (moveUpIdx > 0)
-            std::swap(m_unionBranches[moveUpIdx], m_unionBranches[moveUpIdx - 1]);
-        if (moveDownIdx >= 0 && moveDownIdx + 1 < int(m_unionBranches.size()))
-            std::swap(m_unionBranches[moveDownIdx], m_unionBranches[moveDownIdx + 1]);
-        if (removeIdx >= 0)
-            m_unionBranches.erase(m_unionBranches.begin() + removeIdx);
-    }
-    ImGui::EndChild(); // Fin du panneau gauche
-    // --- PANNEAU DROIT : CLAUSES GLOBALES & ENREGISTREMENT ---
-    ImGui::SameLine();
-    ImGui::BeginChild("UnionOptionsRightPanel", ImVec2(rightPanelWidth, -1.0f), true);
-    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f), "%s  Clauses Globales Post-UNION", ICON_LC_LAYERS);
-    ImGui::Separator();
-    ImGui::Spacing();
-    ImGui::Text("Trier le résultat global (ORDER BY) :");
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputTextWithHint("##UnionOrderCol", "Nom ou alias de colonne (ex: nom)...",
-                             m_unionOrderByColBuf.data(), m_unionOrderByColBuf.size());
-    ImGui::Checkbox("Tri décroissant (DESC)", &m_unionOrderByDesc);
-    ImGui::Spacing();
-    ImGui::Text("Limiter le nombre de lignes (LIMIT) :");
-    ImGui::SetNextItemWidth(140.0f);
-    ImGui::InputInt("##UnionLimitVal", &m_unionLimitValue);
-    if (m_unionLimitValue < 0)
-        m_unionLimitValue = 0;
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.55f, 1.0f), "%s  Enregistrer dans le Catalogue", ICON_LC_SAVE);
-    ImGui::TextDisabled("Permet de réutiliser cet assemblage comme CTE ou dans une Tâche.");
-    ImGui::Spacing();
-    ImGui::Text("Nom de la requête :");
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputTextWithHint("##UnionSaveName", "ex: r_employes_consolides",
-                             m_unionSaveNameBuf.data(), m_unionSaveNameBuf.size());
-    ImGui::Text("Description :");
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputTextWithHint("##UnionSaveDesc", "Description optionnelle...",
-                             m_unionSaveDescBuf.data(), m_unionSaveDescBuf.size());
-    ImGui::Spacing();
-    std::string saveName(m_unionSaveNameBuf.data());
-    bool canSave = hasBranches && !saveName.empty();
-    if (!canSave)
-        ImGui::BeginDisabled();
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.52f, 0.85f, 0.90f));
-    if (ImGui::Button((std::string(ICON_LC_SAVE) + "  Enregistrer l'assemblage").c_str(), ImVec2(-1.0f, 30.0f)))
-    {
-        cppsqlx::SelectQuery compound = compileUnionBuilderToSelectQuery();
-        auto valRes = compound.validate();
-        if (!valRes.has_value())
-        {
-            addConsoleLog("Enregistrement refusé : " + valRes.error(), LogLevel::Error);
-        }
-        else
-        {
-            SavedQuery newSq;
-            newSq.name = saveName;
-            newSq.description = std::string(m_unionSaveDescBuf.data());
-            newSq.sql = compound.toSQL();
-            newSq.compiledSelectJson = compound.toJSON().dump();
-            // Hérite du schéma de sortie de la Branche 1 (avec renommage éventuel)
-            for (const auto &sq : m_savedQueries)
-            {
-                if (sq.name == m_unionBranches[0].queryName)
-                {
-                    newSq.outputSchema = sq.outputSchema;
-                    break;
-                }
-            }
-            // Mise à jour si le nom existe déjà, sinon ajout
-            auto existingIt = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
-                                           [&saveName](const SavedQuery &q)
-                                           { return q.name == saveName; });
-            if (existingIt != m_savedQueries.end())
-                *existingIt = std::move(newSq);
-            else
-                m_savedQueries.push_back(std::move(newSq));
-            addConsoleLog("Requête assemblée '" + saveName + "' enregistrée dans le catalogue.", LogLevel::Success);
-            m_unionSaveNameBuf.fill('\0');
-            m_unionSaveDescBuf.fill('\0');
-        }
-    }
-    ImGui::PopStyleColor();
-    if (!canSave)
-        ImGui::EndDisabled();
-    ImGui::EndChild(); // Fin du panneau droit
-}
