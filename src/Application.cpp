@@ -7387,30 +7387,33 @@ void Application::renderCtePreviewModal()
             ImGui::EndDisabled();
 
         // Sélecteur d'orientation : Horizontal (Gauche -> Droite) / Vertical (Haut -> Bas)
+        // Sélecteur d'orientation : Horizontal / Vertical
         ImGui::SameLine();
         ImGui::TextDisabled("  |  Disposition :");
         ImGui::SameLine();
-        if (m_cteStackHorizontal)
+
+        bool wasHoriz = m_cteStackHorizontal;
+
+        if (wasHoriz)
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.52f, 0.85f, 0.90f));
         if (ImGui::Button("Horizontale", ImVec2(105.0f, 28.0f)))
             m_cteStackHorizontal = true;
-        if (m_cteStackHorizontal)
+        if (wasHoriz)
             ImGui::PopStyleColor();
 
         ImGui::SameLine();
-        if (!m_cteStackHorizontal)
+
+        if (!wasHoriz)
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.52f, 0.85f, 0.90f));
         if (ImGui::Button("Verticale", ImVec2(95.0f, 28.0f)))
             m_cteStackHorizontal = false;
-        if (!m_cteStackHorizontal)
+        if (!wasHoriz)
             ImGui::PopStyleColor();
 
         ImGui::Separator();
         ImGui::Spacing();
 
         // Zone défilante principale
-        ImGuiWindowFlags scrollFlags = m_cteStackHorizontal ? ImGuiWindowFlags_HorizontalScrollbar : ImGuiWindowFlags_None;
-        // Identifiant distinct par orientation pour éviter tout conflit de drapeaux dans Dear ImGui
         const char *scrollChildName = m_cteStackHorizontal ? "CteStackScrollRegion_H" : "CteStackScrollRegion_V";
         ImGuiWindowFlags scrollFlags = m_cteStackHorizontal ? ImGuiWindowFlags_HorizontalScrollbar : ImGuiWindowFlags_None;
         ImGui::BeginChild(scrollChildName, ImVec2(-1.0f, -1.0f), false, scrollFlags);
