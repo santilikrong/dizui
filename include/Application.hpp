@@ -163,6 +163,9 @@ private:
 
         VisualJobStatus executionStatus = VisualJobStatus::Idle;
         std::string statusMessage = "";
+
+        int currentStep = 0;
+        int totalSteps = 0;
     };
 
     struct WorkflowJobLink

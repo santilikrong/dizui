@@ -208,6 +208,18 @@ void Application::renderWorkflowCanvas()
         ed::PushStyleVar(ed::StyleVar_NodePadding, ImVec4(0.0f, 10.0f, 0.0f, 10.0f));
         ed::PushStyleVar(ed::StyleVar_NodeRounding, 6.0f);
 
+        // Lecture thread-safe de l'état et de l'avancement des étapes du nœud
+        VisualJobStatus currentJobStatus = VisualJobStatus::Idle;
+        int stepCur = 0;
+        int stepTot = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
+            if (m_liveJobStatuses.contains(node.taskName))
+                currentJobStatus = m_liveJobStatuses[node.taskName];
+            stepCur = node.currentStep;
+            stepTot = node.totalSteps;
+        }
+
         ed::BeginNode(node.id);
         ImGui::BeginGroup();
 
@@ -216,6 +228,31 @@ void Application::renderWorkflowCanvas()
 
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
         ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.85f), "%s", node.taskName.c_str());
+
+        // Barre d'avancement en nombre d'étapes et pourcentage pendant ou après l'exécution
+        if (stepTot > 0 && (currentJobStatus == VisualJobStatus::Running ||
+                            currentJobStatus == VisualJobStatus::Success ||
+                            currentJobStatus == VisualJobStatus::Failed))
+        {
+            float fraction = std::clamp(static_cast<float>(stepCur) / static_cast<float>(stepTot), 0.0f, 1.0f);
+            int percent = static_cast<int>(fraction * 100.0f);
+
+            char overlayText[64];
+            snprintf(overlayText, sizeof(overlayText), "%d / %d (%d%%)", stepCur, stepTot, percent);
+
+            ImVec4 barColor = ImVec4(0.25f, 0.78f, 0.45f, 0.95f);
+            if (currentJobStatus == VisualJobStatus::Running)
+                barColor = ImVec4(0.95f, 0.70f, 0.20f, 0.95f);
+            else if (currentJobStatus == VisualJobStatus::Failed)
+                barColor = ImVec4(0.90f, 0.30f, 0.30f, 0.95f);
+
+            ImGui::Spacing();
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, barColor);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.16f, 0.19f, 0.24f, 1.0f));
+            ImGui::ProgressBar(fraction, ImVec2(148.0f, 14.0f), overlayText);
+            ImGui::PopStyleColor(2);
+        }
 
         ImGui::Spacing();
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
@@ -256,6 +293,7 @@ void Application::renderWorkflowCanvas()
 
         ImGui::EndGroup();
         ed::EndNode();
+
 
         ed::PopStyleVar(2);
         ed::PopStyleColor(2);
@@ -610,15 +648,26 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
         return;
     }
 
-    // 1. Initialisation de tous les jobs en statut "En attente" (Bleu foncé par défaut)
+    // 4. Initialisation de tous les jobs en statut "En attente" et calcul du total d'étapes par tâche
     {
         std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
         m_liveJobStatuses.clear();
         m_liveJobMessages.clear();
-        for (const auto &node : m_workflowNodes)
+
+        const auto &projectTasks = m_activeProject->tasks();
+        for (auto &node : m_workflowNodes)
         {
             m_liveJobStatuses[node.taskName] = VisualJobStatus::Idle;
             m_liveJobMessages[node.taskName] = "En attente d'exécution";
+
+            node.currentStep = 0;
+            node.totalSteps = 0;
+
+            auto taskIt = projectTasks.find(node.taskName);
+            if (taskIt != projectTasks.end())
+            {
+                node.totalSteps = static_cast<int>(taskIt->second.steps().size());
+            }
         }
     }
 
@@ -632,7 +681,6 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
                 {
         try
         {
-            // Passage du callback temps réel à Workflow::run
             workflowPtr->run(targetGateway, envContext, [this](const std::string& jobName, cppsqlx::JobStatus status, const std::string& msg) {
                 std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
                 m_liveJobMessages[jobName] = msg;
@@ -645,6 +693,49 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
                     m_liveJobStatuses[jobName] = VisualJobStatus::Failed;
                 else
                     m_liveJobStatuses[jobName] = VisualJobStatus::Idle;
+
+                // Mise à jour de l'avancement des étapes sur les nœuds correspondants
+                for (auto &node : m_workflowNodes)
+                {
+                    if (node.taskName != jobName)
+                        continue;
+
+                    if (status == cppsqlx::JobStatus::Success)
+                    {
+                        if (node.totalSteps > 0)
+                            node.currentStep = node.totalSteps;
+                    }
+                    else if (status == cppsqlx::JobStatus::Running)
+                    {
+                        // Détection d'un message de progression détaillé (ex: "STEP:2/5" ou "Step 2/5")
+                        size_t sepPos = msg.find('/');
+                        if (sepPos != std::string::npos && sepPos > 0)
+                        {
+                            size_t startDigits = sepPos;
+                            while (startDigits > 0 && std::isdigit(static_cast<unsigned char>(msg[startDigits - 1])))
+                                --startDigits;
+
+                            size_t endDigits = sepPos + 1;
+                            while (endDigits < msg.size() && std::isdigit(static_cast<unsigned char>(msg[endDigits])))
+                                ++endDigits;
+
+                            if (startDigits < sepPos && endDigits > sepPos + 1)
+                            {
+                                try
+                                {
+                                    int cur = std::stoi(msg.substr(startDigits, sepPos - startDigits));
+                                    int tot = std::stoi(msg.substr(sepPos + 1, endDigits - (sepPos + 1)));
+                                    node.currentStep = cur;
+                                    if (tot > 0)
+                                        node.totalSteps = tot;
+                                }
+                                catch (...)
+                                {
+                                }
+                            }
+                        }
+                    }
+                }
             });
         }
         catch (const std::exception& e)
@@ -655,6 +746,7 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
         m_isWorkflowRunning.store(false); })
         .detach();
 }
+
 
 
 void Application::loadWorkflowIntoVisualDesigner(const SavedWorkflow &savedWorkflow)
