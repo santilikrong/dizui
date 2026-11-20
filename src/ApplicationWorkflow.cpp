@@ -230,6 +230,7 @@ void Application::renderWorkflowCanvas()
         ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.85f), "%s", node.taskName.c_str());
 
         // Barre d'avancement en nombre d'étapes et pourcentage pendant ou après l'exécution
+        // Affichage épuré sans fond de l'avancement en nombre d'étapes et pourcentage
         if (stepTot > 0 && (currentJobStatus == VisualJobStatus::Running ||
                             currentJobStatus == VisualJobStatus::Success ||
                             currentJobStatus == VisualJobStatus::Failed))
@@ -237,22 +238,25 @@ void Application::renderWorkflowCanvas()
             float fraction = std::clamp(static_cast<float>(stepCur) / static_cast<float>(stepTot), 0.0f, 1.0f);
             int percent = static_cast<int>(fraction * 100.0f);
 
-            char overlayText[64];
-            snprintf(overlayText, sizeof(overlayText), "%d / %d (%d%%)", stepCur, stepTot, percent);
+            ImVec4 progressColor = ImVec4(0.35f, 0.85f, 0.50f, 1.0f); // Vert en cas de succès
+            const char *stepIcon = ICON_LC_CHECK;
 
-            ImVec4 barColor = ImVec4(0.25f, 0.78f, 0.45f, 0.95f);
             if (currentJobStatus == VisualJobStatus::Running)
-                barColor = ImVec4(0.95f, 0.70f, 0.20f, 0.95f);
+            {
+                progressColor = ImVec4(0.95f, 0.72f, 0.25f, 1.0f); // Ambre pendant l'exécution
+                stepIcon = ICON_LC_LOADER;
+            }
             else if (currentJobStatus == VisualJobStatus::Failed)
-                barColor = ImVec4(0.90f, 0.30f, 0.30f, 0.95f);
+            {
+                progressColor = ImVec4(0.95f, 0.35f, 0.35f, 1.0f); // Rouge en cas d'erreur
+                stepIcon = ICON_LC_X;
+            }
 
             ImGui::Spacing();
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
-            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, barColor);
-            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.16f, 0.19f, 0.24f, 1.0f));
-            ImGui::ProgressBar(fraction, ImVec2(148.0f, 14.0f), overlayText);
-            ImGui::PopStyleColor(2);
+            ImGui::TextColored(progressColor, "%s  %d / %d (%d%%)", stepIcon, stepCur, stepTot, percent);
         }
+
 
         ImGui::Spacing();
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
