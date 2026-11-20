@@ -258,6 +258,24 @@ private:
         std::vector<CteChainStep> &outSteps,
         int currentDepth = 0) const;
 
+    // Helpers de compilation modulaire du graphe visuel
+    cppsqlx::SQLExpression buildPredicateComparisonExpr(
+        const cppsqlx::SQLExpression &leftExpr,
+        cppsqlx::SQLOperator op,
+        const cppsqlx::SQLExpression &rightExpr) const;
+
+    cppsqlx::SQLExpression parseLiteralOrStringExpr(const std::string &rawValue) const;
+
+    void registerGraphCtes(cppsqlx::SelectQuery &query) const;
+    void compileGraphSelectClause(cppsqlx::SelectQuery &query, bool &outHasAggregate);
+    void compileGraphJoins(cppsqlx::SelectQuery &query) const;
+    void compileGraphWhereAndGroupBy(
+        cppsqlx::SelectQuery &query,
+        bool hasAggregate,
+        const std::set<uintptr_t> &alreadyEmbeddedNodeIds = {},
+        const std::string &unionCteAlias = "") const;
+
+    cppsqlx::SelectQuery compileUnionGraphToSelectQuery();
 
 
 
