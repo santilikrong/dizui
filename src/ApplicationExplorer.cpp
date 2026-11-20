@@ -517,11 +517,6 @@ void Application::renderProjectExplorerTree()
                 }
                 ImGui::PopID();
 
-                // 7. Registre des Jobs
-                if (ImGui::TreeNode("Registre des Jobs"))
-                {
-                    ImGui::TreePop();
-                }
                 // 8. Workflows Enregistrés
                 if (ImGui::TreeNode("Workflows Enregistrés###SavedWorkflowsTreeNode"))
                 {
