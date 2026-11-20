@@ -31,7 +31,24 @@ public:
     Application();
     ~Application();
 
+    enum class LogLevel
+    {
+        Info,
+        Success,
+        Warning,
+        Error
+    };
+
+    struct ConsoleLogEntry
+    {
+        std::string timestamp;
+        LogLevel level;
+        std::string message;
+    };
+
     void run();
+    void addConsoleLog(const std::string &msg, LogLevel level = LogLevel::Info);
+
 
 private:
     // =========================================================================
@@ -171,22 +188,6 @@ private:
         Dracula
     };
 
-    enum class LogLevel
-    {
-        Info,
-        Success,
-        Warning,
-        Error
-    };
-
-    struct ConsoleLogEntry
-    {
-        std::string timestamp;
-        LogLevel level;
-        std::string message;
-    };
-
-
 
     // =========================================================================
     // 2. MÉTHODES DE RENDU DE L'INTERFACE (UI)
@@ -230,8 +231,6 @@ private:
     void renderConnectionModals();
         
     void applyTheme(AppTheme theme);
-
-    void addConsoleLog(const std::string &msg, LogLevel level = LogLevel::Info);
     void renderConsolePanel();
     void renderQueryResultsPanel();
     void renderTaskManagementModals();

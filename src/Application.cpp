@@ -18,7 +18,39 @@
 #include <sstream>
 #include <unordered_set>
 
+#include <log4cxx/appenderskeleton.h>
+#include <log4cxx/spi/loggingevent.h>
+
 using namespace cppsqlx::literals;
+
+class DizuiConsoleAppender : public log4cxx::AppenderSkeleton
+{
+public:
+    explicit DizuiConsoleAppender(Application *app) : m_app(app) {}
+
+    void close() override {}
+    bool requiresLayout() const override { return false; }
+
+protected:
+    void append(const log4cxx::spi::LoggingEventPtr &event, log4cxx::helpers::Pool &) override
+    {
+        if (!m_app || !event)
+            return;
+
+        std::string msg = event->getRenderedMessage();
+        auto levelInt = event->getLevel()->toInt();
+
+        if (levelInt >= log4cxx::Level::ERROR_INT)
+            m_app->addConsoleLog(msg, Application::LogLevel::Error);
+        else if (levelInt >= log4cxx::Level::WARN_INT)
+            m_app->addConsoleLog(msg, Application::LogLevel::Warning);
+        else
+            m_app->addConsoleLog(msg, Application::LogLevel::Info);
+    }
+
+private:
+    Application *m_app = nullptr;
+};
 
 namespace
 {
@@ -75,6 +107,9 @@ namespace
 
 Application::Application()
 {
+
+    auto rootLogger = log4cxx::Logger::getRootLogger();
+    rootLogger->addAppender(std::make_shared<DizuiConsoleAppender>(this));
 
     g_coutRedirector = std::make_unique<GuiStreamRedirector>(std::cout, [this](const std::string &line)
                                                              {
