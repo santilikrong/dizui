@@ -111,17 +111,25 @@ void Application::renderQueryTextEditor()
         m_sqlAutocompleteSelectedIdx = 0;
     }
 
-    // Superposition de la coloration syntaxique
+    // Superposition de la coloration syntaxique synchronisée avec le scroll interne
     ImVec2 editorMin = ImGui::GetItemRectMin();
     ImVec2 editorMax = ImGui::GetItemRectMax();
     ImVec2 framePad = ImGui::GetStyle().FramePadding;
 
     float scrollX = 0.0f;
     float scrollY = 0.0f;
-    if (ImGuiWindow *childWin = ImGui::FindWindowByName("##RawSqlTextEditor"))
+    if (ImGuiWindow *parentWin = ImGui::GetCurrentWindow())
     {
-        scrollX = childWin->Scroll.x;
-        scrollY = childWin->Scroll.y;
+        for (int i = parentWin->DC.ChildWindows.Size - 1; i >= 0; --i)
+        {
+            ImGuiWindow *child = parentWin->DC.ChildWindows[i];
+            if (child && strstr(child->Name, "##RawSqlTextEditor") != nullptr)
+            {
+                scrollX = child->Scroll.x;
+                scrollY = child->Scroll.y;
+                break;
+            }
+        }
     }
 
     ImVec2 textStartPos(editorMin.x + framePad.x - scrollX, editorMin.y + framePad.y - scrollY);
@@ -133,6 +141,7 @@ void Application::renderQueryTextEditor()
         true);
     dizui::sql::renderSqlSyntaxHighlightOverlay(drawList, textStartPos, m_rawSqlEditorBuf.data(), ImGui::GetFont(), ImGui::GetFontSize());
     drawList->PopClipRect();
+
 
     // =========================================================================
     // LOGIQUE D'ANALYSE CONTEXTUELLE ET POPUP D'AUTOCOMPLÉTION
