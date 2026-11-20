@@ -415,7 +415,6 @@ namespace
         return out.str();
     }
 
-
     class GuiStreamRedirector : public std::streambuf
     {
     public:
@@ -467,20 +466,18 @@ namespace
     std::unique_ptr<GuiStreamRedirector> g_cerrRedirector;
 }
 
-
 Application::Application()
 {
 
-    g_coutRedirector = std::make_unique<GuiStreamRedirector>(std::cout, [this](const std::string &line) {
+    g_coutRedirector = std::make_unique<GuiStreamRedirector>(std::cout, [this](const std::string &line)
+                                                             {
         LogLevel lvl = LogLevel::Info;
         if (line.find("succès") != std::string::npos || line.find("OK") != std::string::npos)
             lvl = LogLevel::Success;
-        addConsoleLog(line, lvl);
-    });
+        addConsoleLog(line, lvl); });
 
-    g_cerrRedirector = std::make_unique<GuiStreamRedirector>(std::cerr, [this](const std::string &line) {
-        addConsoleLog(line, LogLevel::Error);
-    });
+    g_cerrRedirector = std::make_unique<GuiStreamRedirector>(std::cerr, [this](const std::string &line)
+                                                             { addConsoleLog(line, LogLevel::Error); });
 
     m_windowManager = std::make_unique<WindowManager>(2200, 1200, "dizui - Linux C++20 Workspace");
     m_renderEngine = std::make_unique<RenderEngine>(m_windowManager->getNativeWindow());
@@ -494,11 +491,11 @@ Application::Application()
     m_workflowContext = ed::CreateEditor(&canvasConfig);
     m_queryContext = ed::CreateEditor(&canvasConfig);
 
-    #ifdef __APPLE__
+#ifdef __APPLE__
     auto res = cppsqlx::DataIntegrationProject::loadFromDisk("/Users/70075J/cppsqlx/projects/finance/project.json");
-    #else
+#else
     auto res = cppsqlx::DataIntegrationProject::loadFromDisk("/home/santili/cppsqlx/projects/finance/project.json");
-    #endif
+#endif
 
     if (res)
     {
@@ -524,8 +521,7 @@ Application::Application()
         createNewProject("Nouveau_Projet");
     }
 
-   
-    applyTheme(AppTheme::Nord); 
+    applyTheme(AppTheme::Nord);
 }
 
 Application::~Application()
@@ -625,158 +621,368 @@ cppsqlx::SelectQuery Application::compileVisualGraphToSelectQuery()
     ed::SetCurrentEditor(m_queryContext);
 
     // =========================================================================
-    // Cas spécial : Graphe d'assemblage Ensembliste (UNION ALL / UNION / etc.)
+    // Cas spécial : Graphe d'assemblage Ensembliste via CTE intermédiaire
+    // Génère : WITH req1 AS (...), req2 AS (...), req_union_... AS (...) SELECT ...
     // =========================================================================
     bool hasUnionLinks = std::any_of(m_visualQueryLinks.begin(), m_visualQueryLinks.end(),
-                                     [](const VisualQueryLink &l) { return l.isSetOperation; });
+                                     [](const VisualQueryLink &l)
+                                     { return l.isSetOperation; });
 
     if (hasUnionLinks)
     {
-        auto loadCteSelectQuery = [&](const std::string &cteName) -> std::optional<cppsqlx::SelectQuery>
+        auto findNodeById = [&](uintptr_t id) -> const VisualQueryNode *
         {
-            for (const auto &sq : m_savedQueries)
-            {
-                if (sq.name == cteName && !sq.compiledSelectJson.is_null() && !sq.compiledSelectJson.empty())
-                {
-                    auto res = cppsqlx::SelectQuery::fromJSON(sq.compiledSelectJson);
-                    if (res.has_value())
-                        return *res;
-                }
-            }
-            return std::nullopt;
+            for (const auto &n : m_visualQueryNodes)
+                if (n.id == id)
+                    return &n;
+            return nullptr;
         };
 
-        const auto &firstNode = m_visualQueryNodes[0];
-        auto rootOpt = loadCteSelectQuery(firstNode.datasetName);
-        if (rootOpt.has_value())
+        auto findSavedQuery = [&](const std::string &name) -> const SavedQuery *
         {
-            query = std::move(*rootOpt);
-
-            // Récupère les en-têtes depuis le schéma de la première CTE
             for (const auto &sq : m_savedQueries)
+                if (sq.name == name)
+                    return &sq;
+            return nullptr;
+        };
+
+        auto buildWhereForNode = [&](uintptr_t targetNodeId, const std::string &aliasPrefix) -> std::string
+        {
+            std::string nodeWhere;
+            for (const auto &pred : m_visualQueryPredicates)
             {
-                if (sq.name == firstNode.datasetName)
+                if (pred.isCustomExpression || pred.connectedSrcPinId == 0 || pred.value.empty())
+                    continue;
+
+                if ((pred.connectedSrcPinId / 1000) != targetNodeId)
+                    continue;
+
+                std::string colName = pred.targetColumn;
+                if (auto dot = colName.find('.'); dot != std::string::npos)
+                    colName = colName.substr(dot + 1);
+
+                std::string fullCol = aliasPrefix.empty() ? colName : (aliasPrefix + "." + colName);
+                cppsqlx::SQLExpression cExpr = operator""_col(fullCol.c_str(), fullCol.length());
+
+                cppsqlx::SQLExpression vExpr;
+                try
                 {
-                    for (const auto &col : sq.outputSchema)
-                        local_select_headers.push_back(col.name);
-                    break;
+                    size_t idx = 0;
+                    long long numVal = std::stoll(pred.value, &idx);
+                    vExpr = (idx == pred.value.length()) ? cppsqlx::SQLExpression(static_cast<int64_t>(numVal))
+                                                         : cppsqlx::SQLExpression(pred.value);
                 }
-            }
-            m_queryResultHeaders = local_select_headers;
-
-            std::set<uintptr_t> unionedIds{firstNode.id};
-            for (const auto &link : m_visualQueryLinks)
-            {
-                if (!link.isSetOperation)
-                    continue;
-
-                uintptr_t sId = link.startPinId / 1000;
-                uintptr_t dId = link.endPinId / 1000;
-                uintptr_t nextId = unionedIds.contains(sId) ? dId : sId;
-                if (unionedIds.contains(nextId))
-                    continue;
-
-                for (const auto &n : m_visualQueryNodes)
+                catch (...)
                 {
-                    if (n.id == nextId && n.isCTE)
-                    {
-                        if (auto branchOpt = loadCteSelectQuery(n.datasetName))
-                        {
-                            if (link.setOp == cppsqlx::SetOperator::UNION_ALL)
-                                query.unionAll(*branchOpt);
-                            else if (link.setOp == cppsqlx::SetOperator::UNION)
-                                query.unionDistinct(*branchOpt);
-                            else if (link.setOp == cppsqlx::SetOperator::INTERSECT)
-                                query.intersect(*branchOpt);
-                            else if (link.setOp == cppsqlx::SetOperator::EXCEPT)
-                                query.except(*branchOpt);
+                    vExpr = cppsqlx::SQLExpression(pred.value);
+                }
 
-                            unionedIds.insert(nextId);
-                        }
-                        break;
+                std::string singlePred;
+                if (pred.op == cppsqlx::SQLOperator::Equal)
+                    singlePred = cExpr.equal(vExpr).toSQL();
+                else if (pred.op == cppsqlx::SQLOperator::NotEqual)
+                    singlePred = cExpr.notEqual(vExpr).toSQL();
+                else if (pred.op == cppsqlx::SQLOperator::Greater)
+                    singlePred = cExpr.greater(vExpr).toSQL();
+                else if (pred.op == cppsqlx::SQLOperator::Less)
+                    singlePred = cExpr.less(vExpr).toSQL();
+                else if (pred.op == cppsqlx::SQLOperator::GreaterOrEqual)
+                    singlePred = cExpr.greaterOrEqual(vExpr).toSQL();
+                else if (pred.op == cppsqlx::SQLOperator::LessOrEqual)
+                    singlePred = cExpr.lessOrEqual(vExpr).toSQL();
+                else
+                    singlePred = cExpr.equal(vExpr).toSQL();
+
+                nodeWhere = nodeWhere.empty() ? singlePred : ("(" + nodeWhere + ") AND (" + singlePred + ")");
+            }
+            return nodeWhere;
+        };
+
+        // Helper pour convertir un nœud (CTE ou Table physique) en SelectQuery élémentaire
+        auto buildBranchSelectQuery = [&](const VisualQueryNode &node, std::string &outBranchName) -> std::optional<cppsqlx::SelectQuery>
+        {
+            outBranchName = node.alias.empty() ? node.datasetName : node.alias;
+            // Nettoie d'éventuels points de schéma ("public.t1" -> "t1") pour un nom de CTE valide
+            if (auto dot = outBranchName.find('.'); dot != std::string::npos)
+                outBranchName = outBranchName.substr(dot + 1);
+
+            if (node.isCTE)
+            {
+                const SavedQuery *sq = findSavedQuery(node.datasetName);
+                if (sq && !sq->compiledSelectJson.is_null() && !sq->compiledSelectJson.empty())
+                {
+                    auto subRes = cppsqlx::SelectQuery::fromJSON(sq->compiledSelectJson);
+                    if (subRes.has_value())
+                    {
+                        // Déclare la CTE source (ex: WITH req1 AS (...))
+                        auto subPtr = std::make_shared<cppsqlx::SelectQuery>(std::move(*subRes));
+                        query.with(outBranchName, subPtr);
+
+                        // Branche de l'union : SELECT * FROM req1
+                        cppsqlx::SelectQuery branchSelect;
+                        branchSelect.select(operator""_col("*", 1));
+                        auto cteRef = std::make_shared<cppsqlx::Dataset>(outBranchName);
+                        branchSelect.from(cteRef, outBranchName);
+                        return branchSelect;
                     }
                 }
             }
-        }
-        return query;
-    }
-
-
-    // =========================================================================
-    // Cas spécial : Graphe d'assemblage Ensembliste (UNION ALL / UNION / etc.)
-    // =========================================================================
-
-    if (hasUnionLinks)
-    {
-        auto loadCteSelectQuery = [&](const std::string &cteName) -> std::optional<cppsqlx::SelectQuery>
-        {
-            for (const auto &sq : m_savedQueries)
+            else if (m_activeProject && m_activeProject->datasets().contains(node.datasetName))
             {
-                if (sq.name == cteName && !sq.compiledSelectJson.is_null() && !sq.compiledSelectJson.empty())
+                const auto &ds = m_activeProject->datasets().at(node.datasetName);
+                cppsqlx::SelectQuery branchSelect;
+
+                if (!node.selectedColumns.empty())
                 {
-                    auto res = cppsqlx::SelectQuery::fromJSON(sq.compiledSelectJson);
-                    if (res.has_value())
-                        return *res;
+                    for (size_t colIdx : node.selectedColumns)
+                    {
+                        if (ds.columns().contains(colIdx))
+                        {
+                            std::string cName = ds.columns().at(colIdx).name();
+                            branchSelect.select(operator""_col(cName.c_str(), cName.length()));
+                        }
+                    }
                 }
+                else
+                {
+                    branchSelect.select(operator""_col("*", 1));
+                }
+
+                auto dsPtr = std::make_shared<cppsqlx::Dataset>(ds);
+                branchSelect.from(dsPtr, outBranchName);
+
+                std::string branchWhere = buildWhereForNode(node.id, outBranchName);
+                if (!branchWhere.empty())
+                {
+                    branchSelect.where(cppsqlx::SQLExpression(branchWhere));
+                }
+
+                return branchSelect;
             }
+
             return std::nullopt;
         };
 
-        const auto &firstNode = m_visualQueryNodes[0];
-        auto rootOpt = loadCteSelectQuery(firstNode.datasetName);
-        if (rootOpt.has_value())
+        // 1. Ordonner les nœuds impliqués dans la chaîne UNION
+        std::vector<const VisualQueryNode *> unionChainNodes;
+        std::vector<cppsqlx::SetOperator> unionOps;
+        std::set<uintptr_t> unionedNodeIds;
+
+        // Trouve le premier lien ensembliste pour démarrer la chaîne
+        for (const auto &link : m_visualQueryLinks)
         {
-            query = std::move(*rootOpt);
+            if (!link.isSetOperation)
+                continue;
 
-            // Récupère les en-têtes depuis le schéma de la première CTE
-            for (const auto &sq : m_savedQueries)
+            const VisualQueryNode *src = findNodeById(link.startPinId / 1000);
+            const VisualQueryNode *dst = findNodeById(link.endPinId / 1000);
+            if (!src || !dst)
+                continue;
+
+            if (unionChainNodes.empty())
             {
-                if (sq.name == firstNode.datasetName)
-                {
-                    for (const auto &col : sq.outputSchema)
-                        local_select_headers.push_back(col.name);
-                    break;
-                }
+                unionChainNodes.push_back(src);
+                unionedNodeIds.insert(src->id);
             }
-            m_queryResultHeaders = local_select_headers;
-
-            std::set<uintptr_t> unionedIds{firstNode.id};
-            for (const auto &link : m_visualQueryLinks)
+            if (!unionedNodeIds.contains(dst->id))
             {
-                if (!link.isSetOperation)
-                    continue;
-
-                uintptr_t sId = link.startPinId / 1000;
-                uintptr_t dId = link.endPinId / 1000;
-                uintptr_t nextId = unionedIds.contains(sId) ? dId : sId;
-                if (unionedIds.contains(nextId))
-                    continue;
-
-                for (const auto &n : m_visualQueryNodes)
-                {
-                    if (n.id == nextId && n.isCTE)
-                    {
-                        if (auto branchOpt = loadCteSelectQuery(n.datasetName))
-                        {
-                            if (link.setOp == cppsqlx::SetOperator::UNION_ALL)
-                                query.unionAll(*branchOpt);
-                            else if (link.setOp == cppsqlx::SetOperator::UNION)
-                                query.unionDistinct(*branchOpt);
-                            else if (link.setOp == cppsqlx::SetOperator::INTERSECT)
-                                query.intersect(*branchOpt);
-                            else if (link.setOp == cppsqlx::SetOperator::EXCEPT)
-                                query.except(*branchOpt);
-
-                            unionedIds.insert(nextId);
-                        }
-                        break;
-                    }
-                }
+                unionChainNodes.push_back(dst);
+                unionOps.push_back(link.setOp);
+                unionedNodeIds.insert(dst->id);
+            }
+            else if (!unionedNodeIds.contains(src->id))
+            {
+                unionChainNodes.push_back(src);
+                unionOps.push_back(link.setOp);
+                unionedNodeIds.insert(src->id);
             }
         }
 
-        ed::SetCurrentEditor(nullptr);
-        return query;
+        if (unionChainNodes.size() >= 2)
+        {
+            std::string firstName;
+            auto unionSubQueryOpt = buildBranchSelectQuery(*unionChainNodes[0], firstName);
+            std::string unionCteName = "req_union_" + firstName;
+
+            if (unionSubQueryOpt.has_value())
+            {
+                for (size_t i = 1; i < unionChainNodes.size(); ++i)
+                {
+                    std::string nextName;
+                    if (auto nextBranchOpt = buildBranchSelectQuery(*unionChainNodes[i], nextName))
+                    {
+                        unionCteName += "_" + nextName;
+                        cppsqlx::SetOperator op = unionOps[i - 1];
+                        if (op == cppsqlx::SetOperator::UNION_ALL)
+                            unionSubQueryOpt->unionAll(*nextBranchOpt);
+                        else if (op == cppsqlx::SetOperator::UNION)
+                            unionSubQueryOpt->unionDistinct(*nextBranchOpt);
+                        else if (op == cppsqlx::SetOperator::INTERSECT)
+                            unionSubQueryOpt->intersect(*nextBranchOpt);
+                        else if (op == cppsqlx::SetOperator::EXCEPT)
+                            unionSubQueryOpt->except(*nextBranchOpt);
+                    }
+                }
+
+                // Déclare la CTE d'assemblage : req_union_req1_req2 AS (SELECT * FROM req1 UNION SELECT * FROM req2)
+                auto unionCtePtr = std::make_shared<cppsqlx::SelectQuery>(std::move(*unionSubQueryOpt));
+                query.with(unionCteName, unionCtePtr);
+
+                // Requête externe : SELECT <colonnes retenues> FROM req_union_req1_req2
+                auto unionDsPtr = std::make_shared<cppsqlx::Dataset>(unionCteName);
+                query.from(unionDsPtr, unionCteName);
+
+                // Projection des colonnes retenues par l'utilisateur dans m_projectionItems
+                cppsqlx::SQLSelectionSet outerSelect;
+                bool hasOuterCols = false;
+
+                if (!m_projectionItems.empty())
+                {
+                    for (const auto &item : m_projectionItems)
+                    {
+                        if (item.sqlExpression.empty())
+                            continue;
+
+                        std::string colOnly = item.sqlExpression;
+                        if (!item.isCustomExpression)
+                        {
+                            if (auto dot = colOnly.find('.'); dot != std::string::npos)
+                                colOnly = colOnly.substr(dot + 1);
+                            colOnly = unionCteName + "." + colOnly;
+                        }
+
+                        cppsqlx::SQLExpression expr = operator""_col(colOnly.c_str(), colOnly.length());
+                        if (!item.alias.empty())
+                            expr = expr.as(item.alias);
+
+                        outerSelect.add(expr);
+                        local_select_headers.push_back(item.alias.empty() ? colOnly : item.alias);
+                        hasOuterCols = true;
+                    }
+                }
+
+                if (hasOuterCols)
+                {
+                    query.select(outerSelect);
+                }
+                else
+                {
+                    query.select(operator""_col("*", 1));
+                    // Récupère les en-têtes depuis le schéma de la première branche
+                    const auto *firstNode = unionChainNodes[0];
+                    if (firstNode->isCTE)
+                    {
+                        if (const SavedQuery *sq = findSavedQuery(firstNode->datasetName))
+                            for (const auto &c : sq->outputSchema)
+                                local_select_headers.push_back(c.name);
+                    }
+                    else if (m_activeProject && m_activeProject->datasets().contains(firstNode->datasetName))
+                    {
+                        const auto &ds = m_activeProject->datasets().at(firstNode->datasetName);
+                        for (size_t cIdx : firstNode->selectedColumns)
+                            if (ds.columns().contains(cIdx))
+                                local_select_headers.push_back(ds.columns().at(cIdx).name());
+                    }
+                    if (local_select_headers.empty())
+                        local_select_headers.push_back("*");
+                }
+
+                m_queryResultHeaders = local_select_headers;
+
+                // Applique aussi d'éventuelles jointures supplémentaires avec d'autres tables non-union
+                for (const auto &link : m_visualQueryLinks)
+                {
+                    if (link.isSetOperation)
+                        continue;
+
+                    const VisualQueryNode *sNode = findNodeById(link.startPinId / 1000);
+                    const VisualQueryNode *dNode = findNodeById(link.endPinId / 1000);
+                    if (!sNode || !dNode)
+                        continue;
+
+                    const VisualQueryNode *extNode = unionedNodeIds.contains(sNode->id) ? dNode : sNode;
+                    if (unionedNodeIds.contains(extNode->id))
+                        continue;
+                    std::shared_ptr<cppsqlx::Dataset> extDs = nullptr;
+                    if (extNode->isCTE)
+                        extDs = std::make_shared<cppsqlx::Dataset>(extNode->datasetName);
+                    else if (m_activeProject->datasets().contains(extNode->datasetName))
+                        extDs = std::make_shared<cppsqlx::Dataset>(m_activeProject->datasets().at(extNode->datasetName));
+                    if (extDs)
+                    {
+                        std::string lCol = link.leftFieldName;
+                        if (auto dot = lCol.find('.'); dot != std::string::npos)
+                            lCol = (unionedNodeIds.contains(sNode->id) ? unionCteName : sNode->alias) + "." + lCol.substr(dot + 1);
+                        std::string rCol = link.rightFieldName;
+                        if (auto dot = rCol.find('.'); dot != std::string::npos)
+                            rCol = (unionedNodeIds.contains(dNode->id) ? unionCteName : dNode->alias) + "." + rCol.substr(dot + 1);
+                        cppsqlx::SQLExpression onExpr = operator""_col(lCol.c_str(), lCol.length())
+                                                            .equal(operator""_col(rCol.c_str(), rCol.length()));
+                        query.join("INNER JOIN", extDs, extNode->alias, onExpr);
+                        unionedNodeIds.insert(extNode->id);
+                    }
+                }
+                // Applique les filtres WHERE sur la requête finale (ex: WHERE id != 10)
+                std::string combinedWhere;
+                for (const auto &pred : m_visualQueryPredicates)
+                {
+                    std::string singlePred;
+                    if (pred.isCustomExpression && !pred.customSqlCondition.empty())
+                    {
+                        singlePred = pred.customSqlCondition;
+                    }
+                    else if (!pred.isCustomExpression && pred.connectedSrcPinId != 0 && !pred.value.empty())
+                    {
+                        uintptr_t srcId = pred.connectedSrcPinId / 1000;
+                        if (unionedNodeIds.contains(srcId))
+                            continue;
+                        std::string colName = pred.targetColumn;
+                        if (auto dot = colName.find('.'); dot != std::string::npos)
+                            colName = colName.substr(dot + 1);
+                        std::string prefix = unionedNodeIds.contains(srcId) ? unionCteName : "";
+                        if (prefix.empty())
+                        {
+                            if (const auto *n = findNodeById(srcId))
+                                prefix = n->alias;
+                        }
+                        std::string fullCol = prefix.empty() ? colName : (prefix + "." + colName);
+                        cppsqlx::SQLExpression cExpr = operator""_col(fullCol.c_str(), fullCol.length());
+                        cppsqlx::SQLExpression vExpr;
+                        try
+                        {
+                            size_t idx = 0;
+                            long long numVal = std::stoll(pred.value, &idx);
+                            vExpr = (idx == pred.value.length()) ? cppsqlx::SQLExpression(static_cast<int64_t>(numVal))
+                                                                 : cppsqlx::SQLExpression(pred.value);
+                        }
+                        catch (...)
+                        {
+                            vExpr = cppsqlx::SQLExpression(pred.value);
+                        }
+                        if (pred.op == cppsqlx::SQLOperator::Equal)
+                            singlePred = cExpr.equal(vExpr).toSQL();
+                        else if (pred.op == cppsqlx::SQLOperator::NotEqual)
+                            singlePred = cExpr.notEqual(vExpr).toSQL();
+                        else if (pred.op == cppsqlx::SQLOperator::Greater)
+                            singlePred = cExpr.greater(vExpr).toSQL();
+                        else if (pred.op == cppsqlx::SQLOperator::Less)
+                            singlePred = cExpr.less(vExpr).toSQL();
+                        else if (pred.op == cppsqlx::SQLOperator::GreaterOrEqual)
+                            singlePred = cExpr.greaterOrEqual(vExpr).toSQL();
+                        else if (pred.op == cppsqlx::SQLOperator::LessOrEqual)
+                            singlePred = cExpr.lessOrEqual(vExpr).toSQL();
+                        else
+                            singlePred = cExpr.equal(vExpr).toSQL();
+                    }
+                    if (!singlePred.empty())
+                        combinedWhere = combinedWhere.empty() ? singlePred : ("(" + combinedWhere + ") AND (" + singlePred + ")");
+                }
+                if (!combinedWhere.empty())
+                    query.where(cppsqlx::SQLExpression(combinedWhere));
+                ed::SetCurrentEditor(nullptr);
+                return query;
+            }
+        }
     }
 
     // =========================================================================
@@ -1173,24 +1379,19 @@ nlohmann::json Application::serializeFullProjectToJSON()
         nlohmann::json schemaArr = nlohmann::json::array();
         for (const auto &col : q.outputSchema)
         {
-            schemaArr.push_back({
-                {"name", col.name},
-                {"dataType", col.dataType},
-                {"isNullable", col.isNullable},
-                {"isPrimaryKey", col.isPrimaryKey}
-            });
+            schemaArr.push_back({{"name", col.name},
+                                 {"dataType", col.dataType},
+                                 {"isNullable", col.isNullable},
+                                 {"isPrimaryKey", col.isPrimaryKey}});
         }
 
-        uiState["queries"].push_back({
-            {"name", q.name},
-            {"description", q.description},
-            {"sql", q.sql},
-            {"visual_state", q.visualState},
-            {"select_json", q.compiledSelectJson},
-            {"output_schema", std::move(schemaArr)}
-        });
+        uiState["queries"].push_back({{"name", q.name},
+                                      {"description", q.description},
+                                      {"sql", q.sql},
+                                      {"visual_state", q.visualState},
+                                      {"select_json", q.compiledSelectJson},
+                                      {"output_schema", std::move(schemaArr)}});
     }
-
 
     uiState["workflows"] = nlohmann::json::array();
     for (const auto &wf : m_savedWorkflows)
@@ -1309,7 +1510,6 @@ bool Application::loadProjectFromFile(const std::string &filePath)
         m_savedTasks.clear();
         m_savedWorkflows.clear();
 
-
         // 3. Repeuplement des tâches depuis m_activeProject
         for (const auto &[tName, taskObj] : m_activeProject->tasks())
         {
@@ -1351,7 +1551,6 @@ bool Application::loadProjectFromFile(const std::string &filePath)
                 }
             }
 
-
             if (uiState.contains("workflows") && uiState["workflows"].is_array())
             {
                 for (const auto &wfJson : uiState["workflows"])
@@ -1388,14 +1587,12 @@ bool Application::loadProjectFromFile(const std::string &filePath)
                         continue;
                     uintptr_t nid = baseId++;
 
-                    vs["nodes"].push_back({
-                        {"id", nid},
-                        {"taskName", jobPtr->name()},
-                        {"x", static_cast<float>(jobPtr->x())},
-                        {"y", static_cast<float>(jobPtr->y())},
-                        {"inputPinId", nid * 10},
-                        {"outputPinId", (nid * 10) + 1}
-                    });
+                    vs["nodes"].push_back({{"id", nid},
+                                           {"taskName", jobPtr->name()},
+                                           {"x", static_cast<float>(jobPtr->x())},
+                                           {"y", static_cast<float>(jobPtr->y())},
+                                           {"inputPinId", nid * 10},
+                                           {"outputPinId", (nid * 10) + 1}});
                 }
 
                 swf.visualState = std::move(vs);
@@ -1414,7 +1611,6 @@ bool Application::loadProjectFromFile(const std::string &filePath)
                   << m_savedTasks.size() << " tâches, " << m_savedWorkflows.size()
                   << " workflows restaurés) : " << filePath << std::endl;
         return true;
-
     }
     catch (const std::exception &e)
     {
@@ -1425,7 +1621,8 @@ bool Application::loadProjectFromFile(const std::string &filePath)
 
 void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
 {
-    m_projectionItems.clear(); m_hasProjectionNode = false;
+    m_projectionItems.clear();
+    m_hasProjectionNode = false;
     // Pré-remplissage des champs de sauvegarde avec les métadonnées de la requête éditée
     strncpy(m_saveQueryNameBuf, savedQuery.name.c_str(), sizeof(m_saveQueryNameBuf) - 1);
     m_saveQueryNameBuf[sizeof(m_saveQueryNameBuf) - 1] = '\0';
@@ -1472,7 +1669,6 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
         }
     }
 
-
     // 3. Restauration des liens de jointures (VisualQueryLink)
     // Restauration des liens et opérateurs de jointure
     if (vState.contains("links") && vState["links"].is_array())
@@ -1504,8 +1700,6 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
         ed::SetCurrentEditor(nullptr);
     }
 
-
-
     // 4. Restauration des filtres (VisualQueryPredicate)
     if (vState.contains("predicates") && vState["predicates"].is_array())
     {
@@ -1523,7 +1717,6 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
             pred.connectedSrcPinId = pJson.value("connectedSrcPinId", uintptr_t(0));
             pred.isCustomExpression = pJson.value("isCustomExpression", false);
             pred.customSqlCondition = pJson.value("customSqlCondition", "");
-
 
             m_visualQueryPredicates.push_back(std::move(pred));
         }
@@ -1548,8 +1741,7 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
         {
             m_projectionNodePos = ImVec2(
                 vState.value("projectionX", 650.0f),
-                vState.value("projectionY", 120.0f)
-            );
+                vState.value("projectionY", 120.0f));
             m_needsProjectionPosInit = true;
         }
     }
@@ -1580,7 +1772,6 @@ void Application::loadQueryIntoVisualDesigner(const SavedQuery &savedQuery)
             m_needsProjectionPosInit = true;
         }
     }
-
 
     m_needsQueryCentering = true;
 
@@ -1690,7 +1881,6 @@ void Application::executeVisualQuery(const std::string &sql)
                     m_executionError = "Échec de connexion : " + (!connectRes ? connectRes.error() : "Impossible de joindre le serveur cible.");
                 }
             }
-
         }
 
         m_showQueryResultsPanel = true;
@@ -1775,7 +1965,6 @@ void Application::renderQueryResultsPanel()
     }
     ImGui::End();
 }
-
 
 void Application::launchWorkflowExecutionAsync(const std::string &logicalConnName, const std::string &envContext)
 {
@@ -1926,7 +2115,6 @@ void Application::renderUI()
         ImGui::DockBuilderDockWindow("Console & Journaux d'Exécution", dock_bottom_id);
         ImGui::DockBuilderDockWindow("Résultat du Graphe Visuel", dock_bottom_id);
 
-
         ImGui::DockBuilderFinish(dockspace_id);
     }
 
@@ -1948,7 +2136,6 @@ void Application::renderUI()
                 createNewProject("Nouveau_Projet");
             }
             ImGui::Separator();
-
 
             if (ImGui::MenuItem("Ouvrir...", "Ctrl+O"))
             {
@@ -2084,7 +2271,8 @@ void Application::renderUI()
     // DES SOUS-SYSTÈMES GRAPHIOQUES
     renderLeftSidebar();
     renderMainContentZone();
-    renderConsolePanel();renderQueryResultsPanel();
+    renderConsolePanel();
+    renderQueryResultsPanel();
     renderGlobalModals();
 }
 
@@ -2108,16 +2296,16 @@ void Application::applyTheme(AppTheme theme)
     case AppTheme::Light:
     {
         ImGui::StyleColorsLight();
-        colors[ImGuiCol_WindowBg]         = ImVec4(0.95f, 0.96f, 0.98f, 1.00f);
-        colors[ImGuiCol_ChildBg]          = ImVec4(0.98f, 0.98f, 0.99f, 1.00f);
-        colors[ImGuiCol_PopupBg]          = ImVec4(1.00f, 1.00f, 1.00f, 0.98f);
-        colors[ImGuiCol_Border]           = ImVec4(0.80f, 0.82f, 0.86f, 1.00f);
-        colors[ImGuiCol_FrameBg]          = ImVec4(0.90f, 0.91f, 0.94f, 1.00f);
-        colors[ImGuiCol_Header]           = ImVec4(0.22f, 0.52f, 0.88f, 0.25f);
-        colors[ImGuiCol_HeaderHovered]    = ImVec4(0.22f, 0.52f, 0.88f, 0.40f);
-        colors[ImGuiCol_Button]           = ImVec4(0.86f, 0.88f, 0.92f, 1.00f);
-        colors[ImGuiCol_ButtonHovered]    = ImVec4(0.22f, 0.52f, 0.88f, 0.35f);
-        canvasBg   = ImVec4(0.92f, 0.93f, 0.96f, 1.00f);
+        colors[ImGuiCol_WindowBg] = ImVec4(0.95f, 0.96f, 0.98f, 1.00f);
+        colors[ImGuiCol_ChildBg] = ImVec4(0.98f, 0.98f, 0.99f, 1.00f);
+        colors[ImGuiCol_PopupBg] = ImVec4(1.00f, 1.00f, 1.00f, 0.98f);
+        colors[ImGuiCol_Border] = ImVec4(0.80f, 0.82f, 0.86f, 1.00f);
+        colors[ImGuiCol_FrameBg] = ImVec4(0.90f, 0.91f, 0.94f, 1.00f);
+        colors[ImGuiCol_Header] = ImVec4(0.22f, 0.52f, 0.88f, 0.25f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.22f, 0.52f, 0.88f, 0.40f);
+        colors[ImGuiCol_Button] = ImVec4(0.86f, 0.88f, 0.92f, 1.00f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.52f, 0.88f, 0.35f);
+        canvasBg = ImVec4(0.92f, 0.93f, 0.96f, 1.00f);
         canvasGrid = ImVec4(0.82f, 0.84f, 0.88f, 0.60f);
         break;
     }
@@ -2125,18 +2313,18 @@ void Application::applyTheme(AppTheme theme)
     case AppTheme::Nord:
     {
         ImGui::StyleColorsDark();
-        colors[ImGuiCol_Text]             = ImVec4(0.93f, 0.94f, 0.96f, 1.00f); // Snow Storm
-        colors[ImGuiCol_WindowBg]         = ImVec4(0.18f, 0.20f, 0.25f, 1.00f); // Polar Night #2E3440
-        colors[ImGuiCol_ChildBg]          = ImVec4(0.21f, 0.24f, 0.29f, 1.00f); // #3B4252
-        colors[ImGuiCol_PopupBg]          = ImVec4(0.18f, 0.20f, 0.25f, 0.98f);
-        colors[ImGuiCol_Border]           = ImVec4(0.30f, 0.34f, 0.42f, 1.00f); // #4C566A
-        colors[ImGuiCol_FrameBg]          = ImVec4(0.26f, 0.30f, 0.37f, 1.00f); // #434C5E
-        colors[ImGuiCol_TitleBgActive]    = ImVec4(0.37f, 0.51f, 0.67f, 1.00f); // Frost #5E81AC
-        colors[ImGuiCol_Header]           = ImVec4(0.53f, 0.75f, 0.82f, 0.30f); // Frost #88C0D0
-        colors[ImGuiCol_HeaderHovered]    = ImVec4(0.53f, 0.75f, 0.82f, 0.45f);
-        colors[ImGuiCol_Button]           = ImVec4(0.26f, 0.30f, 0.37f, 1.00f);
-        colors[ImGuiCol_ButtonHovered]    = ImVec4(0.37f, 0.51f, 0.67f, 0.65f);
-        canvasBg   = ImVec4(0.16f, 0.18f, 0.22f, 1.00f);
+        colors[ImGuiCol_Text] = ImVec4(0.93f, 0.94f, 0.96f, 1.00f);     // Snow Storm
+        colors[ImGuiCol_WindowBg] = ImVec4(0.18f, 0.20f, 0.25f, 1.00f); // Polar Night #2E3440
+        colors[ImGuiCol_ChildBg] = ImVec4(0.21f, 0.24f, 0.29f, 1.00f);  // #3B4252
+        colors[ImGuiCol_PopupBg] = ImVec4(0.18f, 0.20f, 0.25f, 0.98f);
+        colors[ImGuiCol_Border] = ImVec4(0.30f, 0.34f, 0.42f, 1.00f);        // #4C566A
+        colors[ImGuiCol_FrameBg] = ImVec4(0.26f, 0.30f, 0.37f, 1.00f);       // #434C5E
+        colors[ImGuiCol_TitleBgActive] = ImVec4(0.37f, 0.51f, 0.67f, 1.00f); // Frost #5E81AC
+        colors[ImGuiCol_Header] = ImVec4(0.53f, 0.75f, 0.82f, 0.30f);        // Frost #88C0D0
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.53f, 0.75f, 0.82f, 0.45f);
+        colors[ImGuiCol_Button] = ImVec4(0.26f, 0.30f, 0.37f, 1.00f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.37f, 0.51f, 0.67f, 0.65f);
+        canvasBg = ImVec4(0.16f, 0.18f, 0.22f, 1.00f);
         canvasGrid = ImVec4(0.26f, 0.30f, 0.37f, 0.50f);
         break;
     }
@@ -2144,18 +2332,18 @@ void Application::applyTheme(AppTheme theme)
     case AppTheme::Dracula:
     {
         ImGui::StyleColorsDark();
-        colors[ImGuiCol_Text]             = ImVec4(0.97f, 0.97f, 0.95f, 1.00f); // Foreground #F8F8F2
-        colors[ImGuiCol_WindowBg]         = ImVec4(0.16f, 0.16f, 0.21f, 1.00f); // Background #282A36
-        colors[ImGuiCol_ChildBg]          = ImVec4(0.19f, 0.20f, 0.26f, 1.00f);
-        colors[ImGuiCol_PopupBg]          = ImVec4(0.16f, 0.16f, 0.21f, 0.98f);
-        colors[ImGuiCol_Border]           = ImVec4(0.38f, 0.45f, 0.64f, 0.70f); // Comment #6272A4
-        colors[ImGuiCol_FrameBg]          = ImVec4(0.27f, 0.28f, 0.35f, 1.00f); // Current Line #44475A
-        colors[ImGuiCol_TitleBgActive]    = ImVec4(0.74f, 0.58f, 0.98f, 0.85f); // Purple #BD93F9
-        colors[ImGuiCol_Header]           = ImVec4(0.74f, 0.58f, 0.98f, 0.30f);
-        colors[ImGuiCol_HeaderHovered]    = ImVec4(1.00f, 0.47f, 0.78f, 0.40f); // Pink #FF79C6
-        colors[ImGuiCol_Button]           = ImVec4(0.27f, 0.28f, 0.35f, 1.00f);
-        colors[ImGuiCol_ButtonHovered]    = ImVec4(0.74f, 0.58f, 0.98f, 0.50f);
-        canvasBg   = ImVec4(0.13f, 0.14f, 0.18f, 1.00f);
+        colors[ImGuiCol_Text] = ImVec4(0.97f, 0.97f, 0.95f, 1.00f);     // Foreground #F8F8F2
+        colors[ImGuiCol_WindowBg] = ImVec4(0.16f, 0.16f, 0.21f, 1.00f); // Background #282A36
+        colors[ImGuiCol_ChildBg] = ImVec4(0.19f, 0.20f, 0.26f, 1.00f);
+        colors[ImGuiCol_PopupBg] = ImVec4(0.16f, 0.16f, 0.21f, 0.98f);
+        colors[ImGuiCol_Border] = ImVec4(0.38f, 0.45f, 0.64f, 0.70f);        // Comment #6272A4
+        colors[ImGuiCol_FrameBg] = ImVec4(0.27f, 0.28f, 0.35f, 1.00f);       // Current Line #44475A
+        colors[ImGuiCol_TitleBgActive] = ImVec4(0.74f, 0.58f, 0.98f, 0.85f); // Purple #BD93F9
+        colors[ImGuiCol_Header] = ImVec4(0.74f, 0.58f, 0.98f, 0.30f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(1.00f, 0.47f, 0.78f, 0.40f); // Pink #FF79C6
+        colors[ImGuiCol_Button] = ImVec4(0.27f, 0.28f, 0.35f, 1.00f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.74f, 0.58f, 0.98f, 0.50f);
+        canvasBg = ImVec4(0.13f, 0.14f, 0.18f, 1.00f);
         canvasGrid = ImVec4(0.27f, 0.28f, 0.35f, 0.55f);
         break;
     }
@@ -2164,17 +2352,17 @@ void Application::applyTheme(AppTheme theme)
     default:
     {
         ImGui::StyleColorsDark();
-        colors[ImGuiCol_Text]             = ImVec4(0.92f, 0.93f, 0.95f, 1.00f);
-        colors[ImGuiCol_WindowBg]         = ImVec4(0.10f, 0.11f, 0.13f, 1.00f);
-        colors[ImGuiCol_ChildBg]          = ImVec4(0.12f, 0.13f, 0.16f, 1.00f);
-        colors[ImGuiCol_PopupBg]          = ImVec4(0.11f, 0.12f, 0.15f, 0.98f);
-        colors[ImGuiCol_Border]           = ImVec4(0.24f, 0.26f, 0.31f, 1.00f);
-        colors[ImGuiCol_FrameBg]          = ImVec4(0.17f, 0.19f, 0.23f, 1.00f);
-        colors[ImGuiCol_Header]           = ImVec4(0.20f, 0.45f, 0.75f, 0.35f);
-        colors[ImGuiCol_HeaderHovered]    = ImVec4(0.25f, 0.52f, 0.85f, 0.50f);
-        colors[ImGuiCol_Button]           = ImVec4(0.18f, 0.20f, 0.25f, 1.00f);
-        colors[ImGuiCol_ButtonHovered]    = ImVec4(0.25f, 0.52f, 0.85f, 0.45f);
-        canvasBg   = ImVec4(0.09f, 0.10f, 0.12f, 1.00f);
+        colors[ImGuiCol_Text] = ImVec4(0.92f, 0.93f, 0.95f, 1.00f);
+        colors[ImGuiCol_WindowBg] = ImVec4(0.10f, 0.11f, 0.13f, 1.00f);
+        colors[ImGuiCol_ChildBg] = ImVec4(0.12f, 0.13f, 0.16f, 1.00f);
+        colors[ImGuiCol_PopupBg] = ImVec4(0.11f, 0.12f, 0.15f, 0.98f);
+        colors[ImGuiCol_Border] = ImVec4(0.24f, 0.26f, 0.31f, 1.00f);
+        colors[ImGuiCol_FrameBg] = ImVec4(0.17f, 0.19f, 0.23f, 1.00f);
+        colors[ImGuiCol_Header] = ImVec4(0.20f, 0.45f, 0.75f, 0.35f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.25f, 0.52f, 0.85f, 0.50f);
+        colors[ImGuiCol_Button] = ImVec4(0.18f, 0.20f, 0.25f, 1.00f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.52f, 0.85f, 0.45f);
+        canvasBg = ImVec4(0.09f, 0.10f, 0.12f, 1.00f);
         canvasGrid = ImVec4(0.22f, 0.24f, 0.28f, 0.45f);
         break;
     }
@@ -2183,9 +2371,10 @@ void Application::applyTheme(AppTheme theme)
     // Application des couleurs de grille sur les deux éditeurs de nœuds
     auto applyNodeCanvasStyle = [&](ed::EditorContext *ctx)
     {
-        if (!ctx) return;
+        if (!ctx)
+            return;
         ed::SetCurrentEditor(ctx);
-        ed::GetStyle().Colors[ed::StyleColor_Bg]   = canvasBg;
+        ed::GetStyle().Colors[ed::StyleColor_Bg] = canvasBg;
         ed::GetStyle().Colors[ed::StyleColor_Grid] = canvasGrid;
         ed::SetCurrentEditor(nullptr);
     };
@@ -2194,7 +2383,6 @@ void Application::applyTheme(AppTheme theme)
     applyNodeCanvasStyle(m_workflowContext);
     applyNodeCanvasStyle(m_ctePreviewContext);
 }
-
 
 void Application::renderLeftSidebar()
 {
@@ -2455,7 +2643,6 @@ void Application::renderProjectExplorerTree()
                 }
                 ImGui::PopID();
 
-
                 // 3. Datasets (Tables)
                 ImGui::PushID("DatasetsHeaderNode");
                 bool datasets_open = ImGui::TreeNode("Datasets (Tables)");
@@ -2601,7 +2788,8 @@ void Application::renderProjectExplorerTree()
                             std::string finalName = baseName;
                             int suffix = 2;
                             while (std::any_of(m_savedQueries.begin(), m_savedQueries.end(),
-                                               [&finalName](const SavedQuery &q) { return q.name == finalName; }))
+                                               [&finalName](const SavedQuery &q)
+                                               { return q.name == finalName; }))
                             {
                                 finalName = baseName + "_" + std::to_string(suffix++);
                             }
@@ -2724,13 +2912,15 @@ void Application::renderProjectExplorerTree()
                         if (!taskToDuplicate.empty())
                         {
                             auto it = std::find_if(m_savedTasks.begin(), m_savedTasks.end(),
-                                                   [&taskToDuplicate](const cppsqlx::Task &t) { return t.name() == taskToDuplicate; });
+                                                   [&taskToDuplicate](const cppsqlx::Task &t)
+                                                   { return t.name() == taskToDuplicate; });
                             if (it != m_savedTasks.end())
                             {
                                 std::string copyName = taskToDuplicate + "_copie";
                                 int suffix = 2;
                                 while (std::any_of(m_savedTasks.begin(), m_savedTasks.end(),
-                                                   [&copyName](const cppsqlx::Task &t) { return t.name() == copyName; }))
+                                                   [&copyName](const cppsqlx::Task &t)
+                                                   { return t.name() == copyName; }))
                                 {
                                     copyName = taskToDuplicate + "_copie_" + std::to_string(suffix++);
                                 }
@@ -2832,8 +3022,7 @@ void Application::renderProjectExplorerTree()
             "Sombre Moderne (Défaut)",
             "Clair (Studio Light)",
             "Nord (Arctique)",
-            "Dracula (Nocturne)"
-        };
+            "Dracula (Nocturne)"};
 
         int currentThemeIdx = static_cast<int>(m_currentTheme);
         ImGui::Text("Palette de couleurs :");
@@ -2866,7 +3055,6 @@ void Application::renderProjectExplorerTree()
 
         break;
     }
-
     }
     ImGui::End();
 }
@@ -3016,13 +3204,12 @@ void Application::renderReverseEngineeringModal()
                 {
                     m_reverseSelectedSchema = sch;
                     m_reverseSelectedObject = "";
-                    m_cachedTables.clear();    // Force le rechargement des tables du nouveau schéma
+                    m_cachedTables.clear(); // Force le rechargement des tables du nouveau schéma
                     m_cachedStructure.clear();
                 }
             }
             ImGui::EndCombo();
         }
-
 
         if (m_cachedTables.empty())
         {
@@ -3040,7 +3227,7 @@ void Application::renderReverseEngineeringModal()
         if (ImGui::TreeNodeEx("Tables", ImGuiTreeNodeFlags_DefaultOpen))
         {
             // Construction de la liste filtrée (insensible à la casse)
-            std::vector<const std::string*> filteredTables;
+            std::vector<const std::string *> filteredTables;
             filteredTables.reserve(m_cachedTables.size());
             std::string filterStr(tableFilterBuf);
             std::transform(filterStr.begin(), filterStr.end(), filterStr.begin(), ::tolower);
@@ -3698,8 +3885,6 @@ void Application::renderStatusBar()
     ImGui::PopStyleVar();
 }
 
-
-
 void Application::renderQueryEditor()
 {
     float total_available_height = ImGui::GetContentRegionAvail().y - 25.0f;
@@ -3783,7 +3968,8 @@ void Application::renderQueryEditor()
         memset(m_saveQueryNameBuf, 0, sizeof(m_saveQueryNameBuf));
         memset(m_saveQueryDescBuf, 0, sizeof(m_saveQueryDescBuf));
 
-        m_projectionItems.clear(); m_hasProjectionNode = false;
+        m_projectionItems.clear();
+        m_hasProjectionNode = false;
     }
     ImGui::SetItemTooltip("Effacer intégralement le canevas et réinitialiser l'espace");
 
@@ -3811,7 +3997,7 @@ void Application::renderQueryEditor()
     renderQueryCanvas(canvas_height);
 
     // [ Le reste de renderQueryEditor reste parfaitement identique ]
-    //renderQueryCanvas(canvas_height);
+    // renderQueryCanvas(canvas_height);
 
     // 3. Zone Intermédiaire : Le Splitter Horizontal Rédimensionnable
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 2.0f));
@@ -3991,15 +4177,13 @@ void Application::renderQueryEditor()
             for (const auto &n : m_visualQueryNodes)
             {
                 ImVec2 pos = ed::GetNodePosition(n.id);
-                vState["nodes"].push_back({
-                    {"id", n.id},
-                    {"datasetName", n.datasetName},
-                    {"x", pos.x},
-                    {"y", pos.y},
-                    {"alias", n.alias},
-                    {"selectedColumns", n.selectedColumns},
-                    {"isCTE", n.isCTE}
-                });
+                vState["nodes"].push_back({{"id", n.id},
+                                           {"datasetName", n.datasetName},
+                                           {"x", pos.x},
+                                           {"y", pos.y},
+                                           {"alias", n.alias},
+                                           {"selectedColumns", n.selectedColumns},
+                                           {"isCTE", n.isCTE}});
             }
 
             // 2b. Liens et opérateurs de jointure (JOIN)
@@ -4007,57 +4191,50 @@ void Application::renderQueryEditor()
             for (const auto &l : m_visualQueryLinks)
             {
                 ImVec2 joinPos = ed::GetNodePosition(l.centralNodeId);
-                vState["links"].push_back({
-                    {"id", l.id},
-                    {"startPinId", l.startPinId},
-                    {"endPinId", l.endPinId},
-                    {"centralNodeId", l.centralNodeId},
-                    {"leftPinId", l.leftPinId},
-                    {"rightPinId", l.rightPinId},
-                    {"type", static_cast<int>(l.type)},
-                    {"leftFieldName", l.leftFieldName},
-                    {"rightFieldName", l.rightFieldName},
-                    {"op", static_cast<int>(l.op)},
-                    {"joinX", joinPos.x},
-                    {"joinY", joinPos.y},
-                    {"isSetOperation", l.isSetOperation},
-                    {"setOp", static_cast<int>(l.setOp)}
-                });
+                vState["links"].push_back({{"id", l.id},
+                                           {"startPinId", l.startPinId},
+                                           {"endPinId", l.endPinId},
+                                           {"centralNodeId", l.centralNodeId},
+                                           {"leftPinId", l.leftPinId},
+                                           {"rightPinId", l.rightPinId},
+                                           {"type", static_cast<int>(l.type)},
+                                           {"leftFieldName", l.leftFieldName},
+                                           {"rightFieldName", l.rightFieldName},
+                                           {"op", static_cast<int>(l.op)},
+                                           {"joinX", joinPos.x},
+                                           {"joinY", joinPos.y},
+                                           {"isSetOperation", l.isSetOperation},
+                                           {"setOp", static_cast<int>(l.setOp)}});
             }
-
 
             // 2c. Filtres (WHERE)
             vState["predicates"] = nlohmann::json::array();
             for (const auto &p : m_visualQueryPredicates)
             {
                 ImVec2 pPos = ed::GetNodePosition(p.id);
-                vState["predicates"].push_back({
-                    {"id", p.id},
-                    {"x", pPos.x},
-                    {"y", pPos.y},
-                    {"inputPinId", p.inputPinId},
-                    {"outputPinId", p.outputPinId},
-                    {"targetColumn", p.targetColumn},
-                    {"op", static_cast<int>(p.op)},
-                    {"value", p.value},
-                    {"connectedSrcPinId", p.connectedSrcPinId},
-                    {"isCustomExpression", p.isCustomExpression},
-                    {"customSqlCondition", p.customSqlCondition}
-                });
+                vState["predicates"].push_back({{"id", p.id},
+                                                {"x", pPos.x},
+                                                {"y", pPos.y},
+                                                {"inputPinId", p.inputPinId},
+                                                {"outputPinId", p.outputPinId},
+                                                {"targetColumn", p.targetColumn},
+                                                {"op", static_cast<int>(p.op)},
+                                                {"value", p.value},
+                                                {"connectedSrcPinId", p.connectedSrcPinId},
+                                                {"isCustomExpression", p.isCustomExpression},
+                                                {"customSqlCondition", p.customSqlCondition}});
             }
 
             // 2d. Projection unifiée (SELECT / Expressions)
             vState["projections"] = nlohmann::json::array();
             for (const auto &proj : m_projectionItems)
             {
-                vState["projections"].push_back({
-                    {"id", proj.id},
-                    {"alias", proj.alias},
-                    {"sqlExpression", proj.sqlExpression},
-                    {"isAggregate", proj.isAggregate},
-                    {"isCustomExpression", proj.isCustomExpression},
-                    {"sourceNodeId", proj.sourceNodeId}
-                });
+                vState["projections"].push_back({{"id", proj.id},
+                                                 {"alias", proj.alias},
+                                                 {"sqlExpression", proj.sqlExpression},
+                                                 {"isAggregate", proj.isAggregate},
+                                                 {"isCustomExpression", proj.isCustomExpression},
+                                                 {"sourceNodeId", proj.sourceNodeId}});
             }
 
             vState["hasProjectionNode"] = m_hasProjectionNode;
@@ -4077,11 +4254,11 @@ void Application::renderQueryEditor()
                 compiledSql,
                 std::move(vState),
                 std::move(compiledJson),
-                std::move(deducedSchema)
-            };
+                std::move(deducedSchema)};
 
             auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
-                                   [&qName](const SavedQuery &q) { return q.name == qName; });
+                                   [&qName](const SavedQuery &q)
+                                   { return q.name == qName; });
             if (it != m_savedQueries.end())
                 *it = std::move(updatedQuery);
             else
@@ -4096,7 +4273,6 @@ void Application::renderQueryEditor()
 
         ImGui::EndPopup();
     }
-
 }
 
 void Application::renderQueryCanvas(float canvas_height)
@@ -4126,18 +4302,17 @@ void Application::renderQueryCanvas(float canvas_height)
     }
 
     // Fermeture hermétique et étanche du canevas
- ed::End();
- ed::SetCurrentEditor(nullptr);
+    ed::End();
+    ed::SetCurrentEditor(nullptr);
 
- if (!m_pendingCtePreviewName.empty())
- {
-     std::string target = m_pendingCtePreviewName;
-     m_pendingCtePreviewName.clear();
-     openCtePreviewModal(target);
- }
+    if (!m_pendingCtePreviewName.empty())
+    {
+        std::string target = m_pendingCtePreviewName;
+        m_pendingCtePreviewName.clear();
+        openCtePreviewModal(target);
+    }
 
- ImGui::EndChild();
-
+    ImGui::EndChild();
 }
 
 void Application::handleCanvasInteraction()
@@ -4178,7 +4353,6 @@ void Application::handleCanvasInteraction()
     }
 }
 
-
 void Application::renderCanvasDatasetNodes()
 {
     for (auto &visualNode : m_visualQueryNodes)
@@ -4216,7 +4390,6 @@ void Application::renderCanvasDatasetNodes()
             ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Table: %s", ICON_LC_DATABASE, visualNode.datasetName.c_str());
         }
 
-
         ImGui::TextDisabled("  Alias :");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(110.0f);
@@ -4228,7 +4401,6 @@ void Application::renderCanvasDatasetNodes()
             std::string oldAlias = visualNode.alias;
             std::string newAlias = alias_buf.data();
             visualNode.alias = newAlias;
-
 
             // Mise à jour en direct des projections rattachées à ce nœud
             if (!oldAlias.empty() && !newAlias.empty() && oldAlias != newAlias)
@@ -4247,7 +4419,6 @@ void Application::renderCanvasDatasetNodes()
                 }
             }
         }
-
 
         ImGui::Spacing();
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
@@ -4282,7 +4453,6 @@ void Application::renderCanvasDatasetNodes()
                         m_projectionItems.push_back(VisualProjectionItem{
                             nextId, default_alias, qual_expr, false, false, visualNode.id});
                     }
-
 
                     if (!m_hasProjectionNode)
                     {
@@ -4373,7 +4543,6 @@ void Application::renderCanvasDatasetNodes()
     }
 }
 
-
 void Application::renderCanvasFilterNodes()
 {
     for (auto &predicateNode : m_visualQueryPredicates)
@@ -4429,7 +4598,6 @@ void Application::renderCanvasFilterNodes()
 
         if (summary.length() > 28)
             summary = summary.substr(0, 25) + "...";
-
 
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.35f, 0.9f, 0.25f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.35f, 0.9f, 0.45f));
@@ -4507,7 +4675,7 @@ void Application::renderCanvasJoinNodes()
 
             if (link.isSetOperation)
             {
-                join_label = cppsqlx::toString(link.setOp); // "UNION ALL", "UNION", etc.
+                join_label = cppsqlx::toString(link.setOp);     // "UNION ALL", "UNION", etc.
                 icon_color = ImVec4(0.75f, 0.45f, 0.95f, 1.0f); // Violet distinctif
             }
             else
@@ -4528,7 +4696,6 @@ void Application::renderCanvasJoinNodes()
                     icon_color = ImVec4(0.90f, 0.40f, 0.90f, 1.0f);
                 }
             }
-
 
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(icon_color.x, icon_color.y, icon_color.z, 0.20f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(icon_color.x, icon_color.y, icon_color.z, 0.40f));
@@ -4580,7 +4747,6 @@ void Application::renderCanvasJoinNodes()
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (140.0f - text_width) * 0.5f);
             ImGui::TextDisabled("%s", display_expr.c_str());
             ImGui::EndGroup();
-
 
             // Superposition logique des Pins pour l'effet de câble continu traversant
             ImGui::SetCursorPos(ImVec2(local_cursor.x + 70.0f, local_cursor.y + 12.0f));
@@ -4641,7 +4807,6 @@ void Application::handleCanvasActions()
         }
         return "";
     };
-
 
     if (ed::BeginCreate())
     {
@@ -4831,6 +4996,7 @@ void Application::renderQueryModals()
         ImGui::Spacing();
 
         // Option disponible uniquement lorsque deux CTE sont reliées entre elles
+        canBeSetOp = true;
         if (canBeSetOp)
         {
             ImGui::Checkbox("Mode Assemblage Ensembliste (UNION ALL / UNION / INTERSECT / EXCEPT)", &m_editingJoinLink->isSetOperation);
@@ -4952,7 +5118,6 @@ void Application::renderQueryModals()
         ImGui::EndPopup();
     }
 
-
     // =========================================================================
     // MODALE 2 : ÉDITION DE LA CLAUSE WHERE (SIMPLE OU EXPRESSION SQL AVANCÉE)
     // =========================================================================
@@ -5060,116 +5225,115 @@ void Application::renderQueryModals()
         }
         else
         {
-// -----------------------------------------------------------------
-// MODE 2 : EXPRESSION SQL AVANCÉE (3 COLONNES)
-// -----------------------------------------------------------------
-if (strlen(m_whereExprFormulaBuf) == 0 && !m_editingPredicate->customSqlCondition.empty())
-{
-strncpy(m_whereExprFormulaBuf, m_editingPredicate->customSqlCondition.c_str(), sizeof(m_whereExprFormulaBuf) - 1);
-m_whereExprFormulaBuf[sizeof(m_whereExprFormulaBuf) - 1] = '\0';
-}
-float bodyHeight = ImGui::GetContentRegionAvail().y - 45.0f;
-if (bodyHeight < 180.0f)
-bodyHeight = 180.0f;
-auto appendToWhere = [&](const std::string &snippet)
-{
-size_t len = strlen(m_whereExprFormulaBuf);
-if (len + snippet.length() + 1 < sizeof(m_whereExprFormulaBuf))
-{
-strcat(m_whereExprFormulaBuf, snippet.c_str());
-}
-};
-// Colonne gauche : Champs du graphe
-ImGui::BeginChild("WhereFieldsPalette", ImVec2(220.0f, bodyHeight), true);
-ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "CHAMPS DU GRAPHE");
-ImGui::Separator();
-if (m_activeProject)
-{
-for (const auto &node : m_visualQueryNodes)
-{
-if (!m_activeProject->datasets().contains(node.datasetName))
-continue;
-const auto &ds = m_activeProject->datasets().at(node.datasetName);
-if (ImGui::TreeNodeEx((node.alias + " (" + node.datasetName + ")").c_str(), ImGuiTreeNodeFlags_DefaultOpen))
-{
-for (const auto &[idx, col] : ds.columns())
-{
-std::string qual = node.alias + "." + col.name();
-if (ImGui::Selectable(qual.c_str()))
-{
-appendToWhere(qual);
-}
-}
-ImGui::TreePop();
-}
-}
-}
-ImGui::EndChild();
-ImGui::SameLine();
-// Colonne centrale : Zone de saisie de la condition SQL
-float centerWidth = ImGui::GetContentRegionAvail().x - 225.0f;
-ImGui::BeginChild("WhereFormulaZone", ImVec2(centerWidth, bodyHeight), true);
-ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "CONDITION SQL (EX: UPPER(emp.nom) LIKE 'M%')");
-ImGui::Separator();
-ImGui::InputTextMultiline("##WhereCustomMultiline", m_whereExprFormulaBuf, IM_ARRAYSIZE(m_whereExprFormulaBuf),
-ImVec2(-1.0f, bodyHeight - 35.0f), ImGuiInputTextFlags_AllowTabInput);
-ImGui::EndChild();
-ImGui::SameLine();
-// Colonne droite : Opérateurs et fonctions SQL
-ImGui::BeginChild("WhereOperatorsPalette", ImVec2(220.0f, bodyHeight), true);
-ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "OPÉRATEURS & FONCTIONS");
-ImGui::Separator();
-const char *whereSnippets[] = {
-" AND ", " OR ", " NOT ",
-" = ", " <> ", " > ", " < ", " >= ", " <= ",
-" LIKE '%'", " ILIKE '%'",
-" IN (, )", " NOT IN (, )",
-" BETWEEN  AND ",
-" IS NULL", " IS NOT NULL",
-"UPPER()", "LOWER()", "TRIM()",
-"COALESCE(, 0)", "EXTRACT(YEAR FROM )"
-};
-for (const char *snip : whereSnippets)
-{
-if (ImGui::Selectable(snip))
-{
-appendToWhere(snip);
-}
-}
-ImGui::EndChild();
-}
-ImGui::Spacing();
-ImGui::Separator();
-ImGui::Spacing();
-float avail_x = ImGui::GetContentRegionAvail().x;
-ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 230.0f);
-if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
-{
-memset(m_whereExprFormulaBuf, 0, sizeof(m_whereExprFormulaBuf));
-m_showPredicateModal = false;
-ImGui::CloseCurrentPopup();
-}
-ImGui::SameLine();
-if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
-{
-if (m_editingPredicate->isCustomExpression)
-{
-m_editingPredicate->customSqlCondition = std::string(m_whereExprFormulaBuf);
-memset(m_whereExprFormulaBuf, 0, sizeof(m_whereExprFormulaBuf));
-}
-else
-{
-m_editingPredicate->targetColumn = modal_target_display;
-}
-m_showPredicateModal = false;
-ImGui::CloseCurrentPopup();
-}
-ImGui::EndPopup();
-}
-// =========================================================================
-// MODALE 3 : ÉDITEUR AVANCÉ D'EXPRESSION SQL (SELECT / TRANSFORMATIONS)
-// =========================================================================
-renderExpressionEditorModal();
+            // -----------------------------------------------------------------
+            // MODE 2 : EXPRESSION SQL AVANCÉE (3 COLONNES)
+            // -----------------------------------------------------------------
+            if (strlen(m_whereExprFormulaBuf) == 0 && !m_editingPredicate->customSqlCondition.empty())
+            {
+                strncpy(m_whereExprFormulaBuf, m_editingPredicate->customSqlCondition.c_str(), sizeof(m_whereExprFormulaBuf) - 1);
+                m_whereExprFormulaBuf[sizeof(m_whereExprFormulaBuf) - 1] = '\0';
+            }
+            float bodyHeight = ImGui::GetContentRegionAvail().y - 45.0f;
+            if (bodyHeight < 180.0f)
+                bodyHeight = 180.0f;
+            auto appendToWhere = [&](const std::string &snippet)
+            {
+                size_t len = strlen(m_whereExprFormulaBuf);
+                if (len + snippet.length() + 1 < sizeof(m_whereExprFormulaBuf))
+                {
+                    strcat(m_whereExprFormulaBuf, snippet.c_str());
+                }
+            };
+            // Colonne gauche : Champs du graphe
+            ImGui::BeginChild("WhereFieldsPalette", ImVec2(220.0f, bodyHeight), true);
+            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "CHAMPS DU GRAPHE");
+            ImGui::Separator();
+            if (m_activeProject)
+            {
+                for (const auto &node : m_visualQueryNodes)
+                {
+                    if (!m_activeProject->datasets().contains(node.datasetName))
+                        continue;
+                    const auto &ds = m_activeProject->datasets().at(node.datasetName);
+                    if (ImGui::TreeNodeEx((node.alias + " (" + node.datasetName + ")").c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        for (const auto &[idx, col] : ds.columns())
+                        {
+                            std::string qual = node.alias + "." + col.name();
+                            if (ImGui::Selectable(qual.c_str()))
+                            {
+                                appendToWhere(qual);
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+                }
+            }
+            ImGui::EndChild();
+            ImGui::SameLine();
+            // Colonne centrale : Zone de saisie de la condition SQL
+            float centerWidth = ImGui::GetContentRegionAvail().x - 225.0f;
+            ImGui::BeginChild("WhereFormulaZone", ImVec2(centerWidth, bodyHeight), true);
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "CONDITION SQL (EX: UPPER(emp.nom) LIKE 'M%')");
+            ImGui::Separator();
+            ImGui::InputTextMultiline("##WhereCustomMultiline", m_whereExprFormulaBuf, IM_ARRAYSIZE(m_whereExprFormulaBuf),
+                                      ImVec2(-1.0f, bodyHeight - 35.0f), ImGuiInputTextFlags_AllowTabInput);
+            ImGui::EndChild();
+            ImGui::SameLine();
+            // Colonne droite : Opérateurs et fonctions SQL
+            ImGui::BeginChild("WhereOperatorsPalette", ImVec2(220.0f, bodyHeight), true);
+            ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "OPÉRATEURS & FONCTIONS");
+            ImGui::Separator();
+            const char *whereSnippets[] = {
+                " AND ", " OR ", " NOT ",
+                " = ", " <> ", " > ", " < ", " >= ", " <= ",
+                " LIKE '%'", " ILIKE '%'",
+                " IN (, )", " NOT IN (, )",
+                " BETWEEN  AND ",
+                " IS NULL", " IS NOT NULL",
+                "UPPER()", "LOWER()", "TRIM()",
+                "COALESCE(, 0)", "EXTRACT(YEAR FROM )"};
+            for (const char *snip : whereSnippets)
+            {
+                if (ImGui::Selectable(snip))
+                {
+                    appendToWhere(snip);
+                }
+            }
+            ImGui::EndChild();
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 230.0f);
+        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        {
+            memset(m_whereExprFormulaBuf, 0, sizeof(m_whereExprFormulaBuf));
+            m_showPredicateModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        {
+            if (m_editingPredicate->isCustomExpression)
+            {
+                m_editingPredicate->customSqlCondition = std::string(m_whereExprFormulaBuf);
+                memset(m_whereExprFormulaBuf, 0, sizeof(m_whereExprFormulaBuf));
+            }
+            else
+            {
+                m_editingPredicate->targetColumn = modal_target_display;
+            }
+            m_showPredicateModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    // =========================================================================
+    // MODALE 3 : ÉDITEUR AVANCÉ D'EXPRESSION SQL (SELECT / TRANSFORMATIONS)
+    // =========================================================================
+    renderExpressionEditorModal();
 }
 
 void Application::renderWorkflowEditor()
@@ -5664,7 +5828,6 @@ void Application::renderWorkflowModals()
     }
 }
 
-
 void Application::renderCanvasProjectionNode()
 {
     if (!m_hasProjectionNode && m_projectionItems.empty())
@@ -5745,11 +5908,14 @@ void Application::renderCanvasProjectionNode()
 
             // Boutons compacts d'ordonnancement et de suppression
             ImGui::SameLine();
-            if (i > 0 && ImGui::SmallButton("^")) indexMoveUp = i;
+            if (i > 0 && ImGui::SmallButton("^"))
+                indexMoveUp = i;
             ImGui::SameLine();
-            if (i + 1 < static_cast<int>(m_projectionItems.size()) && ImGui::SmallButton("v")) indexMoveDown = i;
+            if (i + 1 < static_cast<int>(m_projectionItems.size()) && ImGui::SmallButton("v"))
+                indexMoveDown = i;
             ImGui::SameLine();
-            if (ImGui::SmallButton("x")) indexToDelete = i;
+            if (ImGui::SmallButton("x"))
+                indexToDelete = i;
 
             ImGui::PopID();
         }
@@ -5768,7 +5934,6 @@ void Application::renderCanvasProjectionNode()
     ed::PopStyleVar(2);
     ed::PopStyleColor(2);
 }
-
 
 void Application::renderExpressionEditorModal()
 {
@@ -5900,7 +6065,12 @@ void Application::renderExpressionEditorModal()
         ImGui::Separator();
         ImGui::Spacing();
 
-        struct SqlFuncTemplate { const char *label; const char *snippet; bool isAgg; };
+        struct SqlFuncTemplate
+        {
+            const char *label;
+            const char *snippet;
+            bool isAgg;
+        };
         const SqlFuncTemplate funcs[] = {
             {"CONCAT(a, ' ', b)", "CONCAT(, ' ', )", false},
             {"UPPER(str)", "UPPER()", false},
@@ -5918,8 +6088,7 @@ void Application::renderExpressionEditorModal()
             {"COUNT(DISTINCT col)", "COUNT(DISTINCT )", true},
             {"AVG(col)", "AVG()", true},
             {"MIN(col)", "MIN()", true},
-            {"MAX(col)", "MAX()", true}
-        };
+            {"MAX(col)", "MAX()", true}};
 
         for (const auto &fn : funcs)
         {
@@ -6407,11 +6576,11 @@ void Application::renderConsolePanel()
 
                 ImVec4 textColor = ImVec4(0.88f, 0.90f, 0.94f, 1.0f); // Info (Blanc cassé)
                 if (entry.level == LogLevel::Success)
-                    textColor = ImVec4(0.35f, 0.85f, 0.45f, 1.0f);     // Succès (Vert)
+                    textColor = ImVec4(0.35f, 0.85f, 0.45f, 1.0f); // Succès (Vert)
                 else if (entry.level == LogLevel::Warning)
-                    textColor = ImVec4(0.95f, 0.75f, 0.25f, 1.0f);     // Avertissement (Jaune/Ambre)
+                    textColor = ImVec4(0.95f, 0.75f, 0.25f, 1.0f); // Avertissement (Jaune/Ambre)
                 else if (entry.level == LogLevel::Error)
-                    textColor = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);     // Erreur (Rouge)
+                    textColor = ImVec4(0.95f, 0.35f, 0.35f, 1.0f); // Erreur (Rouge)
 
                 ImGui::TextDisabled("[%s]", entry.timestamp.c_str());
                 ImGui::SameLine();
@@ -6537,15 +6706,16 @@ void Application::renderTaskManagementModals()
         if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
         {
             auto it = std::find_if(m_savedTasks.begin(), m_savedTasks.end(),
-                                   [this](const cppsqlx::Task &t) { return t.name() == m_targetTaskName; });
+                                   [this](const cppsqlx::Task &t)
+                                   { return t.name() == m_targetTaskName; });
             if (it != m_savedTasks.end())
             {
-              cppsqlx::Task updatedTask(m_targetTaskName);
-              for (size_t idx = 0; idx < m_editTaskUnits.size(); ++idx)
-              {
-                  updatedTask.addStep(static_cast<int>(idx + 1), m_editTaskUnits[idx]);
-              }
-              *it = std::move(updatedTask);
+                cppsqlx::Task updatedTask(m_targetTaskName);
+                for (size_t idx = 0; idx < m_editTaskUnits.size(); ++idx)
+                {
+                    updatedTask.addStep(static_cast<int>(idx + 1), m_editTaskUnits[idx]);
+                }
+                *it = std::move(updatedTask);
             }
             m_showEditTaskModal = false;
             ImGui::CloseCurrentPopup();
@@ -6558,7 +6728,6 @@ void Application::renderTaskManagementModals()
         }
         ImGui::EndPopup();
     }
-
 
     // =========================================================================
     // 2. MODALE DE RENOMMAGE (AVEC MISE À JOUR DU WORKFLOW DESIGNER)
@@ -6578,7 +6747,8 @@ void Application::renderTaskManagementModals()
         bool canRename = !newName.empty() &&
                          (newName == m_targetTaskName ||
                           std::none_of(m_savedTasks.begin(), m_savedTasks.end(),
-                                       [&newName](const cppsqlx::Task &t) { return t.name() == newName; }));
+                                       [&newName](const cppsqlx::Task &t)
+                                       { return t.name() == newName; }));
 
         if (!canRename)
             ImGui::BeginDisabled();
@@ -6587,7 +6757,8 @@ void Application::renderTaskManagementModals()
             if (newName != m_targetTaskName)
             {
                 auto it = std::find_if(m_savedTasks.begin(), m_savedTasks.end(),
-                                       [this](const cppsqlx::Task &t) { return t.name() == m_targetTaskName; });
+                                       [this](const cppsqlx::Task &t)
+                                       { return t.name() == m_targetTaskName; });
                 if (it != m_savedTasks.end())
                 {
                     cppsqlx::Task renamedTask(newName);
@@ -6635,7 +6806,8 @@ void Application::renderTaskManagementModals()
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.22f, 0.22f, 1.0f));
         if (ImGui::Button("Supprimer", ImVec2(120.0f, 0.0f)))
         {
-            std::erase_if(m_savedTasks, [this](const cppsqlx::Task &t) { return t.name() == m_targetTaskName; });
+            std::erase_if(m_savedTasks, [this](const cppsqlx::Task &t)
+                          { return t.name() == m_targetTaskName; });
             m_targetTaskName.clear();
             m_showDeleteTaskModal = false;
             ImGui::CloseCurrentPopup();
@@ -6652,7 +6824,6 @@ void Application::renderTaskManagementModals()
         ImGui::EndPopup();
     }
 }
-
 
 void Application::renderQueryInspectAndDeleteModals()
 {
@@ -6760,7 +6931,6 @@ void Application::renderQueryInspectAndDeleteModals()
         ImGui::EndPopup();
     }
 }
-
 
 void Application::executeRawSqlQuery(const std::string &sqlText)
 {
@@ -7226,7 +7396,7 @@ void Application::openCtePreviewModal(const std::string &cteQueryName)
 
     ed::Config cfg;
     cfg.SettingsFile = nullptr;
-    cfg.NavigateButtonIndex = 1;    // Clic droit maintenu pour déplacer le graphe
+    cfg.NavigateButtonIndex = 1; // Clic droit maintenu pour déplacer le graphe
     cfg.ContextMenuButtonIndex = 2;
     cfg.EnableSmoothZoom = true;
     m_ctePreviewContext = ed::CreateEditor(&cfg);
@@ -7241,12 +7411,9 @@ void Application::openCtePreviewModal(const std::string &cteQueryName)
     ed::GetStyle() = mainStyle;
     ed::SetCurrentEditor(nullptr);
 
-
-
-
-
     auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
-                           [&cteQueryName](const SavedQuery &q) { return q.name == cteQueryName; });
+                           [&cteQueryName](const SavedQuery &q)
+                           { return q.name == cteQueryName; });
 
     if (it != m_savedQueries.end())
     {
@@ -7264,7 +7431,6 @@ void Application::openCtePreviewModal(const std::string &cteQueryName)
         ed::SetCurrentEditor(m_ctePreviewContext);
         loadQueryIntoVisualDesigner(*it);
         ed::SetCurrentEditor(nullptr);
-
 
         // 3. Copie vers les vecteurs d'aperçu en avant-plan
         m_previewCteNodes = m_visualQueryNodes;
@@ -7289,7 +7455,6 @@ void Application::openCtePreviewModal(const std::string &cteQueryName)
     m_needsCtePreviewCentering = true;
     m_showCtePreviewModal = true;
 }
-
 
 void Application::renderCtePreviewModal()
 {
@@ -8033,4 +8198,3 @@ void Application::renderCteStackEditor()
         openCtePreviewModal(target);
     }
 }
-
