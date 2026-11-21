@@ -264,6 +264,7 @@ void Application::renderUI()
         // Regroupement des deux panneaux sous forme d'onglets dans le dock du bas
         ImGui::DockBuilderDockWindow("Console & Journaux d'Exécution", dock_bottom_id);
         ImGui::DockBuilderDockWindow("Résultat du Graphe Visuel", dock_bottom_id);
+        ImGui::DockBuilderDockWindow("Assistant IA (Ollama)", dock_bottom_id);
 
         ImGui::DockBuilderFinish(dockspace_id);
     }
@@ -423,7 +424,9 @@ void Application::renderUI()
     renderMainContentZone();
     renderConsolePanel();
     renderQueryResultsPanel();
+    renderAiAssistantPanel();
     renderGlobalModals();
+    
 }
 
 void Application::applyTheme(AppTheme theme)

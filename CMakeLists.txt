@@ -146,10 +146,13 @@ find_library(LOG4CXX_LIB
     REQUIRED
 )
 
+find_package(CURL REQUIRED)
+
 target_link_libraries(dizui PRIVATE 
     ${CPPSQLX_LIB}
     ${LOG4CXX_LIB}
     PostgreSQL::PostgreSQL
+    CURL::libcurl
 )
 
 set_target_properties(dizui PROPERTIES

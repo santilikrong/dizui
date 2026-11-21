@@ -279,6 +279,9 @@ private:
 
     cppsqlx::SelectQuery compileUnionGraphToSelectQuery();
 
+    void renderAiAssistantPanel();
+    void sendPromptToOllamaAsync(const std::string &userPrompt);
+    std::string buildProjectContextForAi() const;
 
 
 
@@ -516,4 +519,22 @@ private:
 
     bool m_cteStackHorizontal = true;
 
+    // État de l'Assistant IA (Ollama local)
+    struct AiChatMessage
+    {
+        bool isUser = true;
+        std::string text;
+        std::string extractedSql; // Bloc ```sql ... ``` extrait automatiquement s'il existe
+    };
+
+    std::vector<AiChatMessage> m_aiChatHistory;
+    std::array<char, 2048> m_aiPromptBuf{};
+    std::array<char, 128> m_aiOllamaUrlBuf{"http://localhost:11434/api/chat"};
+    std::array<char, 64> m_aiModelNameBuf{"qwen2.5-coder:7b"};
+    bool m_aiIncludeSchemaContext = true;
+    bool m_aiIncludeActiveSqlContext = true;
+    std::atomic<bool> m_isAiThinking{false};
+    std::mutex m_aiChatMutex;
+    bool m_aiScrollToBottom = false;
+    
 };
