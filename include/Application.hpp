@@ -524,4 +524,6 @@ private:
     std::atomic<bool> m_isAiThinking{false};
     std::mutex m_aiChatMutex;
     bool m_aiScrollToBottom = false;
+
+    bool m_showAboutModal = false;
 };

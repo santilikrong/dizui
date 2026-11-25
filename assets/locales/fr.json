@@ -340,5 +340,19 @@
     "project.load_exception": "Échec du chargement du projet",
     "reverse.btn_select_all": "Tout cocher",
     "reverse.btn_deselect_all": "Tout décocher",
-    "reverse.log_imported_count": "table(s) importée(s) dans le projet."
+    "reverse.log_imported_count": "table(s) importée(s) dans le projet.",
+    "menu.quit": "Quitter",
+    "menu.about": "À propos de dizui Studio",
+    "about.modal_title": "À propos de dizui Studio",
+    "about.description": "Environnement visuel d'intégration de données, de conception de requêtes SQL (CTE, fenêtrage) et d'orchestration de pipelines PostgreSQL.",
+    "about.tech_stack_label": "Technologies intégrées",
+    "about.version_label": "Version",
+    "menu.toggle_console": "Afficher / Masquer la console",
+    "edit_menu.format_sql": "Formater le SQL",
+    "edit_menu.copy_compiled_sql": "Copier le SQL compilé",
+    "edit_menu.sync_from_designer": "Synchroniser depuis le Designer",
+    "edit_menu.clear_sql_editor": "Vider l'éditeur SQL",
+    "edit_menu.log_formatted": "Requête SQL formatée dans l'éditeur.",
+    "edit_menu.log_copied_clipboard": "SQL compilé copié dans le presse-papiers.",
+    "edit_menu.log_cleared": "Éditeur SQL vidé."
 }
