@@ -1,4 +1,5 @@
 #include "Application.hpp"
+#include <Localization.hpp>
 #include "IconsLucide.hpp"
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -42,21 +43,20 @@ namespace
 std::string Application::buildProjectContextForAi() const
 {
     std::ostringstream ctx;
-    ctx << "Tu es un assistant expert PostgreSQL et intégration de données intégré dans dizui Studio. "
-        << "Réponds de façon concise en français. Lorsque tu proposes une requête SQL, encadre-la toujours dans un bloc ```sql ... ```.\n\n";
+    ctx << tr("ai.system_prompt") << "\n\n";
 
     if (m_aiIncludeSchemaContext && m_activeProject)
     {
         const auto &datasets = m_activeProject->datasets();
         if (!datasets.empty())
         {
-            ctx << "### Tables disponibles dans le projet :\n";
+            ctx << "### " << tr("ai.ctx_tables_header") << "\n";
             int count = 0;
             for (const auto &[dsName, ds] : datasets)
             {
                 if (++count > 35) // Limite raisonnable pour ne pas saturer le contexte local
                 {
-                    ctx << "- ... (" << (datasets.size() - 35) << " autres tables)\n";
+                    ctx << "- ... (" << (datasets.size() - 35) << " " << tr("ai.ctx_more_tables") << ")\n";
                     break;
                 }
                 ctx << "- " << dsName << " (";
@@ -75,7 +75,7 @@ std::string Application::buildProjectContextForAi() const
 
         if (!m_savedQueries.empty())
         {
-            ctx << "### Requêtes enregistrées (utilisables comme CTE) :\n";
+            ctx << "### " << tr("ai.ctx_saved_queries_header") << "\n";
             for (const auto &sq : m_savedQueries)
             {
                 ctx << "- " << sq.name << " (";
@@ -96,12 +96,12 @@ std::string Application::buildProjectContextForAi() const
         std::string activeSql(m_rawSqlEditorBuf.data());
         if (!activeSql.empty())
         {
-            ctx << "### Requête SQL actuellement ouverte dans l'éditeur :\n```sql\n"
+            ctx << "### " << tr("ai.ctx_active_sql_header") << "\n```sql\n"
                 << activeSql << "\n```\n\n";
         }
         if (!m_executionError.empty())
         {
-            ctx << "### Dernière erreur d'exécution PostgreSQL :\n"
+            ctx << "### " << tr("ai.ctx_last_error_header") << "\n"
                 << m_executionError << "\n\n";
         }
     }
@@ -117,6 +117,14 @@ void Application::sendPromptToOllamaAsync(const std::string &userPrompt)
     std::string systemContext = buildProjectContextForAi();
     std::string endpointUrl(m_aiOllamaUrlBuf.data());
     std::string modelName(m_aiModelNameBuf.data());
+
+    // Capture des chaînes traduites sur le thread UI avant de lancer le thread réseau
+    std::string errCurlInit = tr("ai.err_curl_init");
+    std::string errConnPrefix = tr("ai.err_conn_prefix");
+    std::string errConnHint = tr("ai.err_conn_hint");
+    std::string errHttpPrefix = tr("ai.err_http_prefix");
+    std::string errUnexpected = tr("ai.err_unexpected_resp");
+    std::string errJsonParse = tr("ai.err_json_parse");
 
     // Construction du payload JSON conforme à l'API /api/chat d'Ollama
     nlohmann::json messagesArr = nlohmann::json::array();
@@ -144,7 +152,7 @@ void Application::sendPromptToOllamaAsync(const std::string &userPrompt)
 
     m_isAiThinking.store(true);
 
-    std::thread([this, endpointUrl, payloadStr]()
+    std::thread([this, endpointUrl, payloadStr, errCurlInit, errConnPrefix, errConnHint, errHttpPrefix, errUnexpected, errJsonParse]()
                 {
         std::string responseBody;
         std::string errorMsg;
@@ -152,7 +160,7 @@ void Application::sendPromptToOllamaAsync(const std::string &userPrompt)
         CURL *curl = curl_easy_init();
         if (!curl)
         {
-            errorMsg = "Impossible d'initialiser libcurl.";
+            errorMsg = errCurlInit;
         }
         else
         {
@@ -171,8 +179,8 @@ void Application::sendPromptToOllamaAsync(const std::string &userPrompt)
             CURLcode res = curl_easy_perform(curl);
             if (res != CURLE_OK)
             {
-                errorMsg = std::string("Erreur de connexion Ollama : ") + curl_easy_strerror(res) +
-                           " (Vérifiez qu'Ollama est démarré sur " + endpointUrl + ")";
+                errorMsg = errConnPrefix + " : " + curl_easy_strerror(res) +
+                           " (" + errConnHint + " " + endpointUrl + ")";
             }
             else
             {
@@ -180,7 +188,7 @@ void Application::sendPromptToOllamaAsync(const std::string &userPrompt)
                 curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
                 if (httpCode >= 400)
                 {
-                    errorMsg = "Erreur HTTP Ollama (" + std::to_string(httpCode) + ") : " + responseBody;
+                    errorMsg = errHttpPrefix + " (" + std::to_string(httpCode) + ") : " + responseBody;
                 }
             }
 
@@ -203,11 +211,11 @@ void Application::sendPromptToOllamaAsync(const std::string &userPrompt)
                 else if (respJson.contains("response"))
                     assistantReply = respJson["response"].get<std::string>();
                 else
-                    assistantReply = "Réponse inattendue d'Ollama : " + responseBody;
+                    assistantReply = errUnexpected + " : " + responseBody;
             }
             catch (const std::exception &e)
             {
-                assistantReply = std::string("Erreur de lecture JSON Ollama : ") + e.what();
+                assistantReply = errJsonParse + " : " + e.what();
             }
         }
 
@@ -225,29 +233,34 @@ void Application::sendPromptToOllamaAsync(const std::string &userPrompt)
 
 void Application::renderAiAssistantPanel()
 {
-    ImGui::Begin("Assistant IA (Ollama)");
+    std::string panelTitle = std::string(tr("panel.ai_assistant")) + "###AiAssistantBottomPanel";
+    ImGui::Begin(panelTitle.c_str());
 
     // 1. Barre de configuration compacte en haut
     ImGui::TextColored(ImVec4(0.55f, 0.45f, 0.95f, 1.0f), "%s  Ollama", ICON_LC_CPU);
     ImGui::SameLine();
-    ImGui::TextDisabled("Modèle :");
+    ImGui::TextDisabled("%s", tr("ai.model_label"));
     ImGui::SameLine();
     ImGui::SetNextItemWidth(165.0f);
     ImGui::InputText("##OllamaModel", m_aiModelNameBuf.data(), m_aiModelNameBuf.size());
 
     ImGui::SameLine();
-    ImGui::TextDisabled("URL :");
+    ImGui::TextDisabled("%s", tr("ai.url_label"));
     ImGui::SameLine();
     ImGui::SetNextItemWidth(220.0f);
     ImGui::InputText("##OllamaUrl", m_aiOllamaUrlBuf.data(), m_aiOllamaUrlBuf.size());
 
     ImGui::SameLine();
-    ImGui::Checkbox("Schémas & CTE", &m_aiIncludeSchemaContext);
-    ImGui::SameLine();
-    ImGui::Checkbox("SQL & Erreurs actifs", &m_aiIncludeActiveSqlContext);
+    std::string schemaCheckLabel = std::string(tr("ai.include_schemas_check")) + "###AiSchemaCheck";
+    ImGui::Checkbox(schemaCheckLabel.c_str(), &m_aiIncludeSchemaContext);
 
     ImGui::SameLine();
-    if (ImGui::SmallButton((std::string(ICON_LC_TRASH) + " Vider").c_str()))
+    std::string activeSqlCheckLabel = std::string(tr("ai.include_active_sql_check")) + "###AiActiveSqlCheck";
+    ImGui::Checkbox(activeSqlCheckLabel.c_str(), &m_aiIncludeActiveSqlContext);
+
+    ImGui::SameLine();
+    std::string clearChatBtnLabel = std::string(ICON_LC_TRASH) + " " + tr("sql_editor.btn_clear") + "###ClearAiChatBtn";
+    if (ImGui::SmallButton(clearChatBtnLabel.c_str()))
     {
         std::lock_guard<std::mutex> lock(m_aiChatMutex);
         m_aiChatHistory.clear();
@@ -256,8 +269,8 @@ void Application::renderAiAssistantPanel()
     ImGui::Separator();
 
     // 2. Zone défilante de l'historique des messages
-    float inputBarHeight = 36.0f;
-    float historyHeight = ImGui::GetContentRegionAvail().y - inputBarHeight - 6.0f;
+    float inputBarHeight = 64.0f;
+    float historyHeight = ImGui::GetContentRegionAvail().y - inputBarHeight - 8.0f;
     if (historyHeight < 60.0f)
         historyHeight = 60.0f;
 
@@ -267,7 +280,7 @@ void Application::renderAiAssistantPanel()
 
         if (m_aiChatHistory.empty())
         {
-            ImGui::TextDisabled("Posez une question SQL (ex: 'Écris une requête qui joint t_employes et t_agences' ou 'Corrige l'erreur SQL').");
+            ImGui::TextDisabled("%s", tr("ai.empty_chat_hint"));
         }
 
         for (size_t i = 0; i < m_aiChatHistory.size(); ++i)
@@ -277,7 +290,7 @@ void Application::renderAiAssistantPanel()
 
             if (msg.isUser)
             {
-                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "Vous :");
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s", tr("ai.user_prefix"));
                 ImGui::SameLine();
                 ImGui::PushTextWrapPos(0.0f);
                 ImGui::TextUnformatted(msg.text.c_str());
@@ -285,21 +298,24 @@ void Application::renderAiAssistantPanel()
             }
             else
             {
-                ImGui::TextColored(ImVec4(0.65f, 0.45f, 0.95f, 1.0f), "Assistant IA :");
+                ImGui::TextColored(ImVec4(0.65f, 0.45f, 0.95f, 1.0f), "%s", tr("ai.assistant_prefix"));
                 ImGui::PushTextWrapPos(0.0f);
                 ImGui::TextUnformatted(msg.text.c_str());
                 ImGui::PopTextWrapPos();
+
                 // Boutons d'action directe si l'IA a généré un bloc SQL
                 if (!msg.extractedSql.empty())
                 {
                     ImGui::Spacing();
-                    if (ImGui::SmallButton((std::string(ICON_LC_COPY) + "  Copier dans l'Éditeur SQL").c_str()))
+                    std::string copySqlLabel = std::string(ICON_LC_COPY) + "  " + tr("ai.btn_copy_sql") + "###CopyAiSqlBtn";
+                    if (ImGui::SmallButton(copySqlLabel.c_str()))
                     {
                         snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", msg.extractedSql.c_str());
-                        addConsoleLog("Requête générée par l'IA copiée dans l'Éditeur SQL.", LogLevel::Info);
+                        addConsoleLog(tr("ai.log_sql_copied"), LogLevel::Info);
                     }
                     ImGui::SameLine();
-                    if (ImGui::SmallButton((std::string(ICON_LC_PLAY) + "  Exécuter ce SQL").c_str()))
+                    std::string runSqlLabel = std::string(ICON_LC_PLAY) + "  " + tr("ai.btn_run_sql") + "###RunAiSqlBtn";
+                    if (ImGui::SmallButton(runSqlLabel.c_str()))
                     {
                         snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", msg.extractedSql.c_str());
                         executeRawSqlQuery(msg.extractedSql);
@@ -309,10 +325,11 @@ void Application::renderAiAssistantPanel()
             ImGui::Separator();
             ImGui::PopID();
         }
+
         if (m_isAiThinking.load())
         {
-            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "%s  Génération en cours avec %s...",
-                               ICON_LC_LOADER, m_aiModelNameBuf.data());
+            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "%s  %s %s...",
+                               ICON_LC_LOADER, tr("ai.thinking_prefix"), m_aiModelNameBuf.data());
         }
         if (m_aiScrollToBottom)
         {
@@ -321,29 +338,54 @@ void Application::renderAiAssistantPanel()
         }
     }
     ImGui::EndChild();
-    // 3. Barre de saisie en bas
+
     bool thinking = m_isAiThinking.load();
     if (thinking)
         ImGui::BeginDisabled();
+
     float sendBtnWidth = 115.0f;
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - sendBtnWidth - ImGui::GetStyle().ItemSpacing.x);
-    bool enterPressed = ImGui::InputTextWithHint(
+    float inputWidth = ImGui::GetContentRegionAvail().x - sendBtnWidth - ImGui::GetStyle().ItemSpacing.x;
+    if (inputWidth < 120.0f)
+        inputWidth = 120.0f;
+
+    ImGui::InputTextMultiline(
         "##AiPromptInput",
-        "Demandez une requête SQL, une optimisation ou l'explication d'une erreur (Entrée pour envoyer)...",
         m_aiPromptBuf.data(),
         m_aiPromptBuf.size(),
-        ImGuiInputTextFlags_EnterReturnsTrue);
+        ImVec2(inputWidth, inputBarHeight),
+        ImGuiInputTextFlags_AllowTabInput);
+
+    bool isPromptFocused = ImGui::IsItemFocused();
+
+    // Affiche le texte indicatif (placeholder) lorsque le champ est vide et non focalisé
+    if (m_aiPromptBuf[0] == '\0' && !isPromptFocused)
+    {
+        ImVec2 rectMin = ImGui::GetItemRectMin();
+        ImVec2 pad = ImGui::GetStyle().FramePadding;
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(rectMin.x + pad.x, rectMin.y + pad.y),
+            ImGui::GetColorU32(ImGuiCol_TextDisabled),
+            tr("ai.prompt_hint"));
+    }
+
+    // Raccourci Ctrl + Entrée pour envoyer depuis la zone multiligne
+    bool ctrlEnterPressed = isPromptFocused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.30f, 0.80f, 0.90f));
-    bool sendClicked = ImGui::Button((std::string(ICON_LC_SEND) + "  Envoyer").c_str(), ImVec2(sendBtnWidth, 0.0f));
+    std::string sendBtnLabel = std::string(ICON_LC_SEND) + "  " + tr("ai.btn_send") + "###SendAiPromptBtn";
+    bool sendClicked = ImGui::Button(sendBtnLabel.c_str(), ImVec2(sendBtnWidth, inputBarHeight));
     ImGui::PopStyleColor();
-    if ((enterPressed || sendClicked) && m_aiPromptBuf[0] != '\0')
+
+    if ((ctrlEnterPressed || sendClicked) && m_aiPromptBuf[0] != '\0')
     {
         std::string prompt(m_aiPromptBuf.data());
         m_aiPromptBuf[0] = '\0';
         sendPromptToOllamaAsync(prompt);
     }
+
     if (thinking)
         ImGui::EndDisabled();
+
     ImGui::End();
 }

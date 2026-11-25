@@ -1,4 +1,5 @@
 #include "Application.hpp"
+#include <Localization.hpp>
 #include "IconsLucide.hpp"
 #include <cppsqlx/sqlliterals.hpp>
 #include <cppsqlx/sqljoinexpressionbuilder.hpp>
@@ -11,7 +12,6 @@
 
 namespace ed = ax::NodeEditor;
 using namespace cppsqlx::literals;
-
 
 void Application::renderQueryEditor()
 {
@@ -30,7 +30,7 @@ void Application::renderQueryEditor()
 
     ImGui::AlignTextToFramePadding();
     ImGui::SetCursorPosY((45.0f - ImGui::GetTextLineHeight()) * 0.5f);
-    ImGui::TextDisabled("CONCEPTEUR GRAPHIQUE DE REQUÊTE");
+    ImGui::TextDisabled("%s", tr("designer.header_title"));
 
     // RECALIBRAGE GÉOMÉTRIQUE : 5 boutons carrés de 32px + 4 intervalles de 8px
     float available_width = ImGui::GetContentRegionAvail().x;
@@ -362,7 +362,8 @@ void Application::renderQueryEditor()
                                                  {"sqlExpression", proj.sqlExpression},
                                                  {"isAggregate", proj.isAggregate},
                                                  {"isCustomExpression", proj.isCustomExpression},
-                                                 {"sourceNodeId", proj.sourceNodeId}});
+                                                 {"sourceNodeId", proj.sourceNodeId},
+                                                 {"isWindowFunction", proj.isWindowFunction}});
             }
 
             vState["hasProjectionNode"] = m_hasProjectionNode;
@@ -402,7 +403,6 @@ void Application::renderQueryEditor()
         ImGui::EndPopup();
     }
 }
-
 
 void Application::renderQueryCanvas(float canvas_height)
 {
@@ -444,7 +444,6 @@ void Application::renderQueryCanvas(float canvas_height)
     ImGui::EndChild();
 }
 
-
 void Application::renderQueryResultTable(float bottom_zone_height)
 {
     ImGuiTableFlags table_flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
@@ -456,7 +455,7 @@ void Application::renderQueryResultTable(float bottom_zone_height)
     }
     else if (m_queryResultRows.empty())
     {
-        ImGui::TextDisabled("Aucun résultat d'exécution disponible. Cliquez sur Play pour lancer la requête.");
+        ImGui::TextDisabled("%s", tr("results.empty_hint"));
     }
     else if (ImGui::BeginTable("VisualSQLResultTable", (int)m_queryResultHeaders.size(), table_flags))
     {
@@ -480,18 +479,18 @@ void Application::renderQueryResultTable(float bottom_zone_height)
     ImGui::EndChild();
 }
 
-
 void Application::renderQueryResultsPanel()
 {
     if (!m_showQueryResultsPanel)
         return;
 
     // Rattache automatiquement l'onglet au même dock que la console
-    if (ImGuiWindow *consoleWin = ImGui::FindWindowByName("Console & Journaux d'Exécution"))
+    if (ImGui::FindWindowByName("Console & Journaux d'Exécution###ConsoleBottomPanel"))
     {
-        if (consoleWin->DockId != 0)
+        // Rattache automatiquement l'onglet au même dock que la console
+        if (m_consoleDockId != 0)
         {
-            ImGui::SetNextWindowDockID(consoleWin->DockId, ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowDockID(m_consoleDockId, ImGuiCond_FirstUseEver);
         }
     }
 
@@ -502,19 +501,20 @@ void Application::renderQueryResultsPanel()
     }
 
     ImGui::SetNextWindowSize(ImVec2(800.0f, 200.0f), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Résultat du Graphe Visuel", nullptr))
+    std::string panelTitle = std::string(tr("panel.results")) + "###ResultsBottomPanel";
+    if (ImGui::Begin(panelTitle.c_str(), nullptr))
     {
         if (!m_executionError.empty())
         {
-            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "%s  Erreur SQL : %s", ICON_LC_ALERT_TRIANGLE, m_executionError.c_str());
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "%s  %s : %s", ICON_LC_ALERT_TRIANGLE, tr("results.sql_error"), m_executionError.c_str());
         }
         else if (m_queryResultHeaders.empty() || m_queryResultRows.empty())
         {
-            ImGui::TextDisabled("Aucun résultat d'exécution disponible. Cliquez sur Play pour lancer la requête.");
+            ImGui::TextDisabled("%s", tr("results.empty_hint"));
         }
         else
         {
-            ImGui::TextDisabled("%d ligne(s) retournée(s)", static_cast<int>(m_queryResultRows.size()));
+            ImGui::TextDisabled("%d %s", static_cast<int>(m_queryResultRows.size()), tr("results.rows_returned"));
             ImGui::Separator();
 
             ImGuiTableFlags tableFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
@@ -555,7 +555,6 @@ void Application::renderQueryResultsPanel()
     ImGui::End();
 }
 
-
 void Application::handleCanvasInteraction()
 {
     if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
@@ -582,18 +581,26 @@ void Application::handleCanvasInteraction()
             }
             else if (strcmp(payload->DataType, "DND_PREDICATE_NODE") == 0)
             {
-                uintptr_t new_pred_id = m_visualQueryPredicates.size() + 200;
-                VisualQueryPredicate newPred{
-                    new_pred_id, canvas_space_pos, true,
-                    new_pred_id + 500000, new_pred_id + 550000,
-                    "Choisir...", cppsqlx::SQLOperator::Equal, "", 0};
-                m_visualQueryPredicates.push_back(std::move(newPred));
+                // Un seul nœud Filtre [WHERE] autorisé par requête
+                if (!m_visualQueryPredicates.empty())
+                {
+                    m_editingPredicate = &m_visualQueryPredicates.front();
+                    m_showPredicateModal = true;
+                }
+                else
+                {
+                    uintptr_t new_pred_id = 200;
+                    VisualQueryPredicate newPred{
+                        new_pred_id, canvas_space_pos, true,
+                        new_pred_id + 500000, new_pred_id + 550000,
+                        tr("common.choose_placeholder"), cppsqlx::SQLOperator::Equal, "", 0};
+                    m_visualQueryPredicates.push_back(std::move(newPred));
+                }
             }
             ed::SetCurrentEditor(nullptr);
         }
     }
 }
-
 
 void Application::handleCanvasActions()
 {
@@ -742,7 +749,6 @@ void Application::handleCanvasActions()
     ed::EndDelete();
 }
 
-
 void Application::renderCanvasDatasetNodes()
 {
     for (auto &visualNode : m_visualQueryNodes)
@@ -772,15 +778,15 @@ void Application::renderCanvasDatasetNodes()
                 m_pendingCtePreviewName = visualNode.datasetName;
             }
 
-            ImGui::SetItemTooltip("Visualiser le graphe source de la CTE '%s'", visualNode.datasetName.c_str());
+            ImGui::SetItemTooltip("%s '%s'", tr("node.preview_cte_tooltip"), visualNode.datasetName.c_str());
             ImGui::PopID();
         }
         else
         {
-            ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Table: %s", ICON_LC_DATABASE, visualNode.datasetName.c_str());
+            ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  %s: %s", ICON_LC_DATABASE, tr("node.table_prefix"), visualNode.datasetName.c_str());
         }
 
-        ImGui::TextDisabled("  Alias :");
+        ImGui::TextDisabled("  %s :", tr("node.alias_label"));
         ImGui::SameLine();
         ImGui::SetNextItemWidth(110.0f);
 
@@ -792,9 +798,30 @@ void Application::renderCanvasDatasetNodes()
             std::string newAlias = alias_buf.data();
             visualNode.alias = newAlias;
 
-            // Mise à jour en direct des projections rattachées à ce nœud
+            // Mise à jour en direct des projections (simples, calculées, fenêtrage) et du filtre WHERE
             if (!oldAlias.empty() && !newAlias.empty() && oldAlias != newAlias)
             {
+                auto replaceQualifier = [](std::string &text, const std::string &oldPfx, const std::string &newPfx)
+                {
+                    std::string target = oldPfx + ".";
+                    std::string replacement = newPfx + ".";
+                    size_t pos = 0;
+                    while ((pos = text.find(target, pos)) != std::string::npos)
+                    {
+                        bool validBoundary = (pos == 0) ||
+                                             (!std::isalnum(static_cast<unsigned char>(text[pos - 1])) && text[pos - 1] != '_');
+                        if (validBoundary)
+                        {
+                            text.replace(pos, target.length(), replacement);
+                            pos += replacement.length();
+                        }
+                        else
+                        {
+                            pos += target.length();
+                        }
+                    }
+                };
+
                 std::string oldPrefix = oldAlias + ".";
                 std::string newPrefix = newAlias + ".";
                 for (auto &item : m_projectionItems)
@@ -805,6 +832,18 @@ void Application::renderCanvasDatasetNodes()
                         {
                             item.sqlExpression.replace(0, oldPrefix.length(), newPrefix);
                         }
+                    }
+                    else if (item.isCustomExpression)
+                    {
+                        replaceQualifier(item.sqlExpression, oldAlias, newAlias);
+                    }
+                }
+
+                for (auto &pred : m_visualQueryPredicates)
+                {
+                    if (pred.isCustomExpression)
+                    {
+                        replaceQualifier(pred.customSqlCondition, oldAlias, newAlias);
                     }
                 }
             }
@@ -897,7 +936,7 @@ void Application::renderCanvasDatasetNodes()
             {
                 if (foundQuery->outputSchema.empty())
                 {
-                    ImGui::TextDisabled("  (Schéma vide - réenregistrez la requête)");
+                    ImGui::TextDisabled("  %s", tr("node.empty_cte_schema"));
                 }
                 else
                 {
@@ -909,7 +948,7 @@ void Application::renderCanvasDatasetNodes()
             }
             else
             {
-                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "  Requête introuvable !");
+                ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "  %s", tr("node.query_not_found"));
             }
         }
         // Branche B : Dataset physique classique
@@ -933,89 +972,112 @@ void Application::renderCanvasDatasetNodes()
     }
 }
 
-
 void Application::renderCanvasFilterNodes()
 {
-    for (auto &predicateNode : m_visualQueryPredicates)
+    if (m_visualQueryPredicates.empty())
+        return;
+
+    // Compatibilité ascendante : si une ancienne requête avait plusieurs nœuds WHERE, on les fusionne en un seul bloc
+    if (m_visualQueryPredicates.size() > 1)
     {
-        if (predicateNode.needsPositionInitialization)
+        std::string combinedSql;
+        for (size_t i = 0; i < m_visualQueryPredicates.size(); ++i)
         {
-            predicateNode.needsPositionInitialization = false;
-            ed::SetNodePosition(predicateNode.id, predicateNode.position);
-        }
-
-        ed::PushStyleColor(ed::StyleColor_NodeBg, ImVec4(0.22f, 0.15f, 0.32f, 0.85f));
-        ed::PushStyleColor(ed::StyleColor_NodeBorder, ImVec4(0.55f, 0.35f, 0.9f, 1.0f));
-
-        ed::BeginNode(predicateNode.id);
-        ImGui::BeginGroup();
-
-        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s  Filtre [WHERE]", ICON_LC_FILTER);
-        ImGui::Spacing();
-        ImGui::Dummy(ImVec2(0.0f, 2.0f));
-
-        ed::BeginPin(predicateNode.inputPinId, ed::PinKind::Input);
-        ImGui::TextDisabled(" ▪ In");
-        ed::EndPin();
-        ImGui::SameLine();
-
-        std::string live_target_column = predicateNode.targetColumn;
-        if (predicateNode.connectedSrcPinId != 0)
-        {
-            uintptr_t table_node_id = predicateNode.connectedSrcPinId / 1000;
-            for (const auto &n : m_visualQueryNodes)
+            const auto &p = m_visualQueryPredicates[i];
+            std::string part = p.isCustomExpression
+                                   ? p.customSqlCondition
+                                   : (p.targetColumn + " " + std::string(cppsqlx::toSQL(p.op)) + " " + p.value);
+            if (!part.empty())
             {
-                if (n.id == table_node_id)
-                {
-                    std::string raw_col = predicateNode.targetColumn;
-                    if (auto dot = raw_col.find('.'); dot != std::string::npos)
-                        raw_col = raw_col.substr(dot + 1);
-                    live_target_column = n.alias + "." + raw_col;
-                }
+                if (!combinedSql.empty())
+                    combinedSql += " AND ";
+                combinedSql += part;
             }
         }
+        auto &primary = m_visualQueryPredicates.front();
+        primary.isCustomExpression = true;
+        primary.customSqlCondition = combinedSql;
+        m_visualQueryPredicates.resize(1);
+    }
 
-        std::string op_symbol = std::string(cppsqlx::toSQL(predicateNode.op));
-        std::string summary;
-        if (predicateNode.isCustomExpression)
+    auto &predicateNode = m_visualQueryPredicates.front();
+
+    if (predicateNode.needsPositionInitialization)
+    {
+        predicateNode.needsPositionInitialization = false;
+        ed::SetNodePosition(predicateNode.id, predicateNode.position);
+    }
+
+    ed::PushStyleColor(ed::StyleColor_NodeBg, ImVec4(0.22f, 0.15f, 0.32f, 0.85f));
+    ed::PushStyleColor(ed::StyleColor_NodeBorder, ImVec4(0.55f, 0.35f, 0.9f, 1.0f));
+
+    ed::BeginNode(predicateNode.id);
+    ImGui::BeginGroup();
+
+    ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s  %s", ICON_LC_FILTER, tr("filter.node_title"));
+    ImGui::Spacing();
+    ImGui::Dummy(ImVec2(0.0f, 2.0f));
+
+    ed::BeginPin(predicateNode.inputPinId, ed::PinKind::Input);
+    ImGui::TextDisabled(" ▪ %s", tr("filter.pin_in"));
+    ed::EndPin();
+    ImGui::SameLine();
+
+    std::string live_target_column = predicateNode.targetColumn;
+    if (predicateNode.connectedSrcPinId != 0)
+    {
+        uintptr_t table_node_id = predicateNode.connectedSrcPinId / 1000;
+        for (const auto &n : m_visualQueryNodes)
         {
-            summary = predicateNode.customSqlCondition.empty() ? "Définir expression WHERE..." : predicateNode.customSqlCondition;
-        }
-        else
-        {
-            std::string op_symbol = std::string(cppsqlx::toSQL(predicateNode.op));
-            summary = live_target_column + " " + op_symbol + " " + (predicateNode.value.empty() ? "?" : predicateNode.value);
-        }
-
-        if (summary.length() > 28)
-            summary = summary.substr(0, 25) + "...";
-
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.35f, 0.9f, 0.25f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.35f, 0.9f, 0.45f));
-        if (ImGui::Button(summary.c_str(), ImVec2(130.0f, 24.0f)))
-        {
-            m_editingPredicate = &predicateNode;
-            m_showPredicateModal = true;
-        }
-        ImGui::PopStyleColor(2);
-        ImGui::SetItemTooltip("Cliquez pour éditer la condition du prédicat");
-        ImGui::SameLine();
-
-        ed::BeginPin(predicateNode.outputPinId, ed::PinKind::Output);
-        ImGui::TextColored(ImVec4(0.55f, 0.35f, 0.9f, 0.6f), " %s", ICON_LC_CHEVRON_RIGHT);
-        ed::EndPin();
-
-        ImGui::EndGroup();
-        ed::EndNode();
-        ed::PopStyleColor(2);
-
-        if (predicateNode.connectedSrcPinId != 0)
-        {
-            ed::Link(predicateNode.id + 90000, predicateNode.connectedSrcPinId, predicateNode.inputPinId, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 2.5f);
+            if (n.id == table_node_id)
+            {
+                std::string raw_col = predicateNode.targetColumn;
+                if (auto dot = raw_col.find('.'); dot != std::string::npos)
+                    raw_col = raw_col.substr(dot + 1);
+                live_target_column = n.alias + "." + raw_col;
+            }
         }
     }
-}
 
+    std::string summary;
+    if (predicateNode.isCustomExpression)
+    {
+        summary = predicateNode.customSqlCondition.empty() ? tr("filter.define_expr_placeholder") : predicateNode.customSqlCondition;
+    }
+    else
+    {
+        std::string op_symbol = std::string(cppsqlx::toSQL(predicateNode.op));
+        summary = live_target_column + " " + op_symbol + " " + (predicateNode.value.empty() ? "?" : predicateNode.value);
+    }
+
+    if (summary.length() > 34)
+        summary = summary.substr(0, 31) + "...";
+
+    std::string summaryBtnLabel = summary + "###FilterSummaryBtn_" + std::to_string(predicateNode.id);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.35f, 0.9f, 0.25f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.35f, 0.9f, 0.45f));
+    if (ImGui::Button(summaryBtnLabel.c_str(), ImVec2(170.0f, 24.0f)))
+    {
+        m_editingPredicate = &predicateNode;
+        m_showPredicateModal = true;
+    }
+    ImGui::PopStyleColor(2);
+    ImGui::SetItemTooltip("%s", tr("filter.edit_tooltip"));
+    ImGui::SameLine();
+
+    ed::BeginPin(predicateNode.outputPinId, ed::PinKind::Output);
+    ImGui::TextColored(ImVec4(0.55f, 0.35f, 0.9f, 0.6f), " %s", ICON_LC_CHEVRON_RIGHT);
+    ed::EndPin();
+
+    ImGui::EndGroup();
+    ed::EndNode();
+    ed::PopStyleColor(2);
+
+    if (predicateNode.connectedSrcPinId != 0)
+    {
+        ed::Link(predicateNode.id + 90000, predicateNode.connectedSrcPinId, predicateNode.inputPinId, ImVec4(1.0f, 1.0f, 1.0f, 1.0f), 2.5f);
+    }
+}
 
 void Application::renderCanvasJoinNodes()
 {
@@ -1108,13 +1170,7 @@ void Application::renderCanvasJoinNodes()
                 if (n.id == dst_node_id)
                     dst_alias = n.alias;
             }
-            std::string left_pure = link.leftFieldName;
-            if (auto dot_pos = left_pure.find('.'); dot_pos != std::string::npos)
-                left_pure = left_pure.substr(dot_pos + 1);
-            std::string right_pure = link.rightFieldName;
-            if (auto dot_pos = right_pure.find('.'); dot_pos != std::string::npos)
-                right_pure = right_pure.substr(dot_pos + 1);
-            std::string op_symbol = std::string(cppsqlx::toSQL(link.op));
+
             std::string display_expr;
             if (link.isSetOperation)
             {
@@ -1159,7 +1215,6 @@ void Application::renderCanvasJoinNodes()
     }
 }
 
-
 void Application::renderCanvasProjectionNode()
 {
     if (!m_hasProjectionNode && m_projectionItems.empty())
@@ -1181,9 +1236,10 @@ void Application::renderCanvasProjectionNode()
     ImGui::BeginGroup();
 
     // En-tête du nœud (sans chevauchement)
-    ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "%s  Projection [SELECT]", ICON_LC_LAYERS);
+    ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.0f, 1.0f), "%s  %s", ICON_LC_LAYERS, tr("projection.node_title"));
     ImGui::SameLine(250.0f);
-    if (ImGui::SmallButton((std::string(ICON_LC_PLUS_CIRCLE) + " Expr").c_str()))
+    std::string addExprBtn = std::string(ICON_LC_PLUS_CIRCLE) + " " + tr("projection.btn_add_expr") + "###AddProjExprBtn";
+    if (ImGui::SmallButton(addExprBtn.c_str()))
     {
         m_editingProjectionIndex = -1;
         memset(m_exprAliasBuf, 0, sizeof(m_exprAliasBuf));
@@ -1191,16 +1247,14 @@ void Application::renderCanvasProjectionNode()
         m_exprIsAggregate = false;
         m_showExpressionModal = true;
     }
-    ImGui::SetItemTooltip("Créer une nouvelle colonne calculée (Expression SQL)");
+    ImGui::SetItemTooltip("%s", tr("projection.add_expr_tooltip"));
 
-    // Remplacement de ImGui::Separator() (qui débordait sur tout le canevas) par un espace net
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
     ImGui::Spacing();
 
     if (m_projectionItems.empty())
     {
-        ImGui::TextDisabled("Cochez des colonnes ou cliquez sur '+ Expr'");
+        ImGui::TextDisabled("%s", tr("projection.empty_hint"));
     }
     else
     {
@@ -1214,7 +1268,9 @@ void Application::renderCanvasProjectionNode()
             ImGui::PushID(static_cast<int>(item.id) + i);
 
             // Badge visuel : [fx] pour une expression calculée, [col] pour un champ brut
-            if (item.isCustomExpression)
+            if (item.isWindowFunction)
+                ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "[win]");
+            else if (item.isCustomExpression)
                 ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "[fx]");
             else
                 ImGui::TextDisabled("[col]");
@@ -1226,7 +1282,8 @@ void Application::renderCanvasProjectionNode()
             if (displayLabel.length() > 34)
                 displayLabel = displayLabel.substr(0, 31) + "...";
 
-            if (ImGui::Selectable(displayLabel.c_str(), false, ImGuiSelectableFlags_None, ImVec2(210.0f, 18.0f)))
+            std::string selectableLabel = displayLabel + "###ProjItemSelect";
+            if (ImGui::Selectable(selectableLabel.c_str(), false, ImGuiSelectableFlags_None, ImVec2(210.0f, 18.0f)))
             {
                 m_editingProjectionIndex = i;
                 strncpy(m_exprAliasBuf, item.alias.c_str(), sizeof(m_exprAliasBuf) - 1);
@@ -1236,7 +1293,7 @@ void Application::renderCanvasProjectionNode()
                 m_exprIsAggregate = item.isAggregate;
                 m_showExpressionModal = true;
             }
-            ImGui::SetItemTooltip("Cliquer pour éditer l'alias ou la formule SQL :\n%s AS %s", item.sqlExpression.c_str(), item.alias.c_str());
+            ImGui::SetItemTooltip("%s :\n%s AS %s", tr("projection.edit_item_tooltip"), item.sqlExpression.c_str(), item.alias.c_str());
 
             // Boutons compacts d'ordonnancement et de suppression
             ImGui::SameLine();
@@ -1267,87 +1324,70 @@ void Application::renderCanvasProjectionNode()
     ed::PopStyleColor(2);
 }
 
-
 void Application::renderQueryModals()
 {
     // =========================================================================
-    // MODALE 1 : ÉDITION DE LA JOINTURE (JOIN)
+    // MODALE 1 : ÉDITION DE LA JOINTURE (JOIN / UNION)
     // =========================================================================
+    std::string joinModalTitle = std::string(tr("join_modal.title")) + "###JoinClauseModal";
     if (m_showJoinModal && m_editingJoinLink != nullptr)
     {
-        ImGui::OpenPopup("Éditeur de Clause de Jointure");
+        ImGui::OpenPopup(joinModalTitle.c_str());
     }
-    if (ImGui::BeginPopupModal("Éditeur de Clause de Jointure", &m_showJoinModal, ImGuiWindowFlags_None))
+    if (ImGui::BeginPopupModal(joinModalTitle.c_str(), &m_showJoinModal, ImGuiWindowFlags_None))
     {
         uintptr_t s_node = m_editingJoinLink->startPinId / 1000;
         uintptr_t d_node = m_editingJoinLink->endPinId / 1000;
         std::string current_src_alias = "";
         std::string current_dst_alias = "";
-        bool src_is_cte = false;
-        bool dst_is_cte = false;
 
         for (const auto &n : m_visualQueryNodes)
         {
             if (n.id == s_node)
-            {
                 current_src_alias = n.alias;
-                src_is_cte = n.isCTE;
-            }
             if (n.id == d_node)
-            {
                 current_dst_alias = n.alias;
-                dst_is_cte = n.isCTE;
-            }
-        }
-
-        bool canBeSetOp = (src_is_cte && dst_is_cte);
-        if (!canBeSetOp)
-        {
-            m_editingJoinLink->isSetOperation = false;
         }
 
         if (m_editingJoinLink->isSetOperation)
-            ImGui::TextColored(ImVec4(0.75f, 0.45f, 0.95f, 1.0f), "%s  Configuration de l'Assemblage Ensembliste (UNION)", ICON_LC_SETTINGS);
+            ImGui::TextColored(ImVec4(0.75f, 0.45f, 0.95f, 1.0f), "%s  %s", ICON_LC_SETTINGS, tr("join_modal.union_subtitle"));
         else
-            ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Configuration de l'Opérateur JOIN", ICON_LC_SETTINGS);
+            ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_SETTINGS, tr("join_modal.join_subtitle"));
 
         ImGui::Separator();
         ImGui::Spacing();
 
-        // Option disponible uniquement lorsque deux CTE sont reliées entre elles
-        canBeSetOp = true;
-        if (canBeSetOp)
-        {
-            ImGui::Checkbox("Mode Assemblage Ensembliste (UNION ALL / UNION / INTERSECT / EXCEPT)", &m_editingJoinLink->isSetOperation);
-            ImGui::Separator();
-            ImGui::Spacing();
-        }
+        std::string setOpCheckLabel = std::string(tr("join_modal.enable_set_op")) + "###JoinSetOpCheck";
+        ImGui::Checkbox(setOpCheckLabel.c_str(), &m_editingJoinLink->isSetOperation);
+        ImGui::Separator();
+        ImGui::Spacing();
 
         if (m_editingJoinLink->isSetOperation)
         {
-            ImGui::TextDisabled("1. OPÉRATEUR ENSEMBLISTE ENTRE LES DEUX REQUÊTES");
+            ImGui::TextDisabled("%s", tr("join_modal.set_op_section"));
             ImGui::Spacing();
 
             int current_set_op = static_cast<int>(m_editingJoinLink->setOp);
-            ImGui::RadioButton("UNION ALL (Empilement complet sans dédoublonnage)", &current_set_op, static_cast<int>(cppsqlx::SetOperator::UNION_ALL));
-            ImGui::RadioButton("UNION (Empilement avec dédoublonnage DISTINCT)", &current_set_op, static_cast<int>(cppsqlx::SetOperator::UNION));
-            ImGui::RadioButton("INTERSECT (Lignes communes aux deux requêtes)", &current_set_op, static_cast<int>(cppsqlx::SetOperator::INTERSECT));
-            ImGui::RadioButton("EXCEPT (Lignes de la première absentes de la seconde)", &current_set_op, static_cast<int>(cppsqlx::SetOperator::EXCEPT));
+            ImGui::RadioButton(tr("join_modal.union_all_desc"), &current_set_op, static_cast<int>(cppsqlx::SetOperator::UNION_ALL));
+            ImGui::RadioButton(tr("join_modal.union_desc"), &current_set_op, static_cast<int>(cppsqlx::SetOperator::UNION));
+            ImGui::RadioButton(tr("join_modal.intersect_desc"), &current_set_op, static_cast<int>(cppsqlx::SetOperator::INTERSECT));
+            ImGui::RadioButton(tr("join_modal.except_desc"), &current_set_op, static_cast<int>(cppsqlx::SetOperator::EXCEPT));
             m_editingJoinLink->setOp = static_cast<cppsqlx::SetOperator>(current_set_op);
 
             ImGui::Spacing();
-            ImGui::TextDisabled("Flux assemblé : %s  %s  %s",
+            ImGui::TextDisabled("%s : %s  %s  %s",
+                                tr("join_modal.assembled_flow"),
                                 current_src_alias.c_str(),
                                 cppsqlx::toString(m_editingJoinLink->setOp).c_str(),
                                 current_dst_alias.c_str());
-            ImGui::TextDisabled("Les deux requêtes doivent projeter le même nombre de colonnes.");
+            ImGui::TextDisabled("%s", tr("join_modal.same_columns_hint"));
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
 
             float avail_x = ImGui::GetContentRegionAvail().x;
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
-            if (ImGui::Button("Enregistrer", ImVec2(120, 0)))
+            if (ImGui::Button(tr("btn.save"), ImVec2(120, 0)))
             {
                 m_showJoinModal = false;
                 ImGui::CloseCurrentPopup();
@@ -1355,17 +1395,17 @@ void Application::renderQueryModals()
         }
         else
         {
-            ImGui::TextDisabled("1. TYPE DE JOINTURE");
+            ImGui::TextDisabled("%s", tr("join_modal.join_type_section"));
             int current_type = (int)m_editingJoinLink->type;
-            ImGui::RadioButton("INNER JOIN (Intersection)", &current_type, (int)cppsqlx::JoinType::INNER);
-            ImGui::RadioButton("LEFT JOIN (Priorité Table Gauche)", &current_type, (int)cppsqlx::JoinType::LEFT);
-            ImGui::RadioButton("RIGHT JOIN (Priorité Table Droite)", &current_type, (int)cppsqlx::JoinType::RIGHT);
-            ImGui::RadioButton("FULL JOIN (Union Complète)", &current_type, (int)cppsqlx::JoinType::FULL);
+            ImGui::RadioButton(tr("join_modal.inner_desc"), &current_type, (int)cppsqlx::JoinType::INNER);
+            ImGui::RadioButton(tr("join_modal.left_desc"), &current_type, (int)cppsqlx::JoinType::LEFT);
+            ImGui::RadioButton(tr("join_modal.right_desc"), &current_type, (int)cppsqlx::JoinType::RIGHT);
+            ImGui::RadioButton(tr("join_modal.full_desc"), &current_type, (int)cppsqlx::JoinType::FULL);
             m_editingJoinLink->type = (cppsqlx::JoinType)current_type;
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
-            ImGui::TextDisabled("2. CONDITION DE JOINTURE STRUCTUREE (SQLJoinExpression)");
+            ImGui::TextDisabled("%s", tr("join_modal.condition_section"));
             ImGui::Spacing();
 
             std::string left_col_raw = m_editingJoinLink->leftFieldName;
@@ -1379,9 +1419,9 @@ void Application::renderQueryModals()
 
             if (ImGui::BeginTable("##join_expr_table", 3, ImGuiTableFlags_Resizable))
             {
-                ImGui::TableSetupColumn("Champ Gauche", ImGuiTableColumnFlags_WidthStretch, 0.43f);
-                ImGui::TableSetupColumn("Op", ImGuiTableColumnFlags_WidthStretch, 0.14f);
-                ImGui::TableSetupColumn("Champ Droite", ImGuiTableColumnFlags_WidthStretch, 0.43f);
+                ImGui::TableSetupColumn(tr("join_modal.col_left"), ImGuiTableColumnFlags_WidthStretch, 0.43f);
+                ImGui::TableSetupColumn(tr("join_modal.col_op"), ImGuiTableColumnFlags_WidthStretch, 0.14f);
+                ImGui::TableSetupColumn(tr("join_modal.col_right"), ImGuiTableColumnFlags_WidthStretch, 0.43f);
                 ImGui::TableHeadersRow();
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
@@ -1425,7 +1465,7 @@ void Application::renderQueryModals()
             ImGui::Spacing();
             float avail_x = ImGui::GetContentRegionAvail().x;
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
-            if (ImGui::Button("Enregistrer", ImVec2(120, 0)))
+            if (ImGui::Button(tr("btn.save"), ImVec2(120, 0)))
             {
                 m_editingJoinLink->leftFieldName = live_left_display;
                 m_editingJoinLink->rightFieldName = live_right_display;
@@ -1440,9 +1480,15 @@ void Application::renderQueryModals()
     // =========================================================================
     // MODALE 2 : ÉDITION DE LA CLAUSE WHERE (SIMPLE OU EXPRESSION SQL AVANCÉE)
     // =========================================================================
+    static int s_whereCursorPos = 0;
+    static int s_wherePendingCursorPos = -1;
+
+    std::string whereModalTitle = std::string(tr("where_modal.title")) + "###WhereFilterModal";
     if (m_showPredicateModal && m_editingPredicate != nullptr)
     {
-        ImGui::OpenPopup("Configuration du Filtre WHERE");
+        ImGui::OpenPopup(whereModalTitle.c_str());
+        s_whereCursorPos = static_cast<int>(strlen(m_whereExprFormulaBuf));
+        s_wherePendingCursorPos = -1;
     }
 
     if (m_editingPredicate != nullptr && m_editingPredicate->isCustomExpression)
@@ -1450,9 +1496,9 @@ void Application::renderQueryModals()
     else
         ImGui::SetNextWindowSize(ImVec2(520.0f, 240.0f), ImGuiCond_Appearing);
 
-    if (ImGui::BeginPopupModal("Configuration du Filtre WHERE", &m_showPredicateModal, ImGuiWindowFlags_None))
+    if (ImGui::BeginPopupModal(whereModalTitle.c_str(), &m_showPredicateModal, ImGuiWindowFlags_None))
     {
-        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s  Configuration de la Condition de Filtrage (WHERE)", ICON_LC_FILTER);
+        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s  %s", ICON_LC_FILTER, tr("where_modal.subtitle"));
         ImGui::Separator();
         ImGui::Spacing();
 
@@ -1473,7 +1519,8 @@ void Application::renderQueryModals()
         }
 
         // Case à cocher pour basculer entre Condition Simple et Expression SQL libre
-        if (ImGui::Checkbox("Mode Expression SQL Avancée (Condition libre, fonctions, LIKE, IN, AND/OR...)", &m_editingPredicate->isCustomExpression))
+        std::string advExprCheckLabel = std::string(tr("where_modal.advanced_mode_check")) + "###WhereAdvExprCheck";
+        if (ImGui::Checkbox(advExprCheckLabel.c_str(), &m_editingPredicate->isCustomExpression))
         {
             if (m_editingPredicate->isCustomExpression)
             {
@@ -1502,17 +1549,17 @@ void Application::renderQueryModals()
             // -----------------------------------------------------------------
             // MODE 1 : CONDITION SIMPLE (Colonne liée | Opérateur | Valeur)
             // -----------------------------------------------------------------
-            ImGui::TextDisabled("Champ cible :");
+            ImGui::TextDisabled("%s", tr("where_modal.target_field_label"));
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", modal_target_display.c_str());
             ImGui::Spacing();
-            ImGui::TextDisabled("ÉDITION DE L'EXPRESSION DE FILTRE");
+            ImGui::TextDisabled("%s", tr("where_modal.edit_expr_header"));
             ImGui::Spacing();
 
             if (ImGui::BeginTable("##predicate_expr_table", 2, ImGuiTableFlags_Resizable))
             {
-                ImGui::TableSetupColumn("Opérateur", ImGuiTableColumnFlags_WidthStretch, 0.35f);
-                ImGui::TableSetupColumn("Valeur / Littéral", ImGuiTableColumnFlags_WidthStretch, 0.65f);
+                ImGui::TableSetupColumn(tr("where_modal.col_operator"), ImGuiTableColumnFlags_WidthStretch, 0.35f);
+                ImGui::TableSetupColumn(tr("where_modal.col_value"), ImGuiTableColumnFlags_WidthStretch, 0.65f);
                 ImGui::TableHeadersRow();
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
@@ -1547,62 +1594,147 @@ void Application::renderQueryModals()
             // -----------------------------------------------------------------
             // MODE 2 : EXPRESSION SQL AVANCÉE (3 COLONNES)
             // -----------------------------------------------------------------
+            static int s_whereCursorPos = 0;
+            static int s_wherePendingCursorPos = -1;
+            static bool s_whereNeedsRefocus = false;
+
             if (strlen(m_whereExprFormulaBuf) == 0 && !m_editingPredicate->customSqlCondition.empty())
             {
                 strncpy(m_whereExprFormulaBuf, m_editingPredicate->customSqlCondition.c_str(), sizeof(m_whereExprFormulaBuf) - 1);
                 m_whereExprFormulaBuf[sizeof(m_whereExprFormulaBuf) - 1] = '\0';
+                s_whereCursorPos = static_cast<int>(strlen(m_whereExprFormulaBuf));
             }
+
+            // Sécurise l'index du curseur dans les bornes actuelles du buffer
+            int currentBufLen = static_cast<int>(strlen(m_whereExprFormulaBuf));
+            if (s_whereCursorPos < 0 || s_whereCursorPos > currentBufLen)
+                s_whereCursorPos = currentBufLen;
+
             float bodyHeight = ImGui::GetContentRegionAvail().y - 45.0f;
             if (bodyHeight < 180.0f)
                 bodyHeight = 180.0f;
-            auto appendToWhere = [&](const std::string &snippet)
+
+            auto insertSnippetInWhere = [&](const std::string &snippet)
             {
-                size_t len = strlen(m_whereExprFormulaBuf);
-                if (len + snippet.length() + 1 < sizeof(m_whereExprFormulaBuf))
+                std::string currentText(m_whereExprFormulaBuf);
+                int insertPos = std::clamp(s_whereCursorPos, 0, static_cast<int>(currentText.size()));
+
+                currentText.insert(insertPos, snippet);
+
+                if (currentText.size() < sizeof(m_whereExprFormulaBuf))
                 {
-                    strcat(m_whereExprFormulaBuf, snippet.c_str());
+                    snprintf(m_whereExprFormulaBuf, sizeof(m_whereExprFormulaBuf), "%s", currentText.c_str());
+
+                    size_t emptyParens = snippet.find("()");
+                    size_t emptyQuotes = snippet.find("''");
+                    if (emptyParens != std::string::npos)
+                        s_wherePendingCursorPos = insertPos + static_cast<int>(emptyParens) + 1;
+                    else if (emptyQuotes != std::string::npos)
+                        s_wherePendingCursorPos = insertPos + static_cast<int>(emptyQuotes) + 1;
+                    else
+                        s_wherePendingCursorPos = insertPos + static_cast<int>(snippet.size());
+
+                    s_whereCursorPos = s_wherePendingCursorPos;
+                    s_whereNeedsRefocus = true;
                 }
             };
-            // Colonne gauche : Champs du graphe
+
+            // Colonne gauche : Champs du graphe (Tables ET CTE)
             ImGui::BeginChild("WhereFieldsPalette", ImVec2(220.0f, bodyHeight), true);
-            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "CHAMPS DU GRAPHE");
+            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s", tr("where_modal.graph_fields_header"));
             ImGui::Separator();
-            if (m_activeProject)
+
+            for (const auto &node : m_visualQueryNodes)
             {
-                for (const auto &node : m_visualQueryNodes)
+                std::string prefix = node.alias.empty() ? "" : (node.alias + ".");
+                std::string treeLabel = (node.isCTE ? "[CTE] " : "") + node.alias + " (" + node.datasetName + ")";
+
+                if (node.isCTE)
                 {
-                    if (!m_activeProject->datasets().contains(node.datasetName))
-                        continue;
+                    if (ImGui::TreeNodeEx(treeLabel.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        for (const auto &sq : m_savedQueries)
+                        {
+                            if (sq.name == node.datasetName)
+                            {
+                                for (const auto &col : sq.outputSchema)
+                                {
+                                    std::string qual = prefix + col.name;
+                                    if (ImGui::Selectable(qual.c_str()))
+                                        insertSnippetInWhere(qual);
+                                }
+                                break;
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+                }
+                else if (m_activeProject && m_activeProject->datasets().contains(node.datasetName))
+                {
                     const auto &ds = m_activeProject->datasets().at(node.datasetName);
-                    if (ImGui::TreeNodeEx((node.alias + " (" + node.datasetName + ")").c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                    if (ImGui::TreeNodeEx(treeLabel.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
                     {
                         for (const auto &[idx, col] : ds.columns())
                         {
-                            std::string qual = node.alias + "." + col.name();
+                            std::string qual = prefix + col.name();
                             if (ImGui::Selectable(qual.c_str()))
-                            {
-                                appendToWhere(qual);
-                            }
+                                insertSnippetInWhere(qual);
                         }
                         ImGui::TreePop();
                     }
                 }
             }
             ImGui::EndChild();
+
             ImGui::SameLine();
+
             // Colonne centrale : Zone de saisie de la condition SQL
             float centerWidth = ImGui::GetContentRegionAvail().x - 225.0f;
             ImGui::BeginChild("WhereFormulaZone", ImVec2(centerWidth, bodyHeight), true);
-            ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "CONDITION SQL (EX: UPPER(emp.nom) LIKE 'M%')");
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s", tr("where_modal.sql_condition_header"));
             ImGui::Separator();
-            ImGui::InputTextMultiline("##WhereCustomMultiline", m_whereExprFormulaBuf, IM_ARRAYSIZE(m_whereExprFormulaBuf),
-                                      ImVec2(-1.0f, bodyHeight - 35.0f), ImGuiInputTextFlags_AllowTabInput);
+
+            auto whereCursorCallback = [](ImGuiInputTextCallbackData *data) -> int
+            {
+                if (s_wherePendingCursorPos >= 0)
+                {
+                    int targetPos = std::clamp(s_wherePendingCursorPos, 0, data->BufTextLen);
+                    data->CursorPos = targetPos;
+                    data->SelectionStart = targetPos;
+                    data->SelectionEnd = targetPos;
+                    s_wherePendingCursorPos = -1;
+                }
+                else
+                {
+                    // Ne met à jour s_whereCursorPos que si le champ est réellement actif
+                    s_whereCursorPos = data->CursorPos;
+                }
+                return 0;
+            };
+
+            if (s_whereNeedsRefocus)
+            {
+                ImGui::SetKeyboardFocusHere();
+                s_whereNeedsRefocus = false;
+            }
+
+            ImGui::InputTextMultiline(
+                "##WhereCustomMultiline",
+                m_whereExprFormulaBuf,
+                IM_ARRAYSIZE(m_whereExprFormulaBuf),
+                ImVec2(-1.0f, bodyHeight - 35.0f),
+                ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackAlways,
+                whereCursorCallback);
+
             ImGui::EndChild();
+
             ImGui::SameLine();
+
             // Colonne droite : Opérateurs et fonctions SQL
             ImGui::BeginChild("WhereOperatorsPalette", ImVec2(220.0f, bodyHeight), true);
-            ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "OPÉRATEURS & FONCTIONS");
+            ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s", tr("where_modal.operators_header"));
             ImGui::Separator();
+
             const char *whereSnippets[] = {
                 " AND ", " OR ", " NOT ",
                 " = ", " <> ", " > ", " < ", " >= ", " <= ",
@@ -1612,28 +1744,31 @@ void Application::renderQueryModals()
                 " IS NULL", " IS NOT NULL",
                 "UPPER()", "LOWER()", "TRIM()",
                 "COALESCE(, 0)", "EXTRACT(YEAR FROM )"};
+
             for (const char *snip : whereSnippets)
             {
                 if (ImGui::Selectable(snip))
                 {
-                    appendToWhere(snip);
+                    insertSnippetInWhere(snip);
                 }
             }
             ImGui::EndChild();
         }
+
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
+
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 230.0f);
-        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
         {
             memset(m_whereExprFormulaBuf, 0, sizeof(m_whereExprFormulaBuf));
             m_showPredicateModal = false;
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.save"), ImVec2(120.0f, 0.0f)))
         {
             if (m_editingPredicate->isCustomExpression)
             {
@@ -1655,30 +1790,40 @@ void Application::renderQueryModals()
     renderExpressionEditorModal();
 }
 
-
 void Application::renderExpressionEditorModal()
 {
-    if (m_showExpressionModal)
-        ImGui::OpenPopup("Éditeur Avancé d'Expression SQL");
+    static int s_exprCursorPos = 0;
+    static int s_pendingCursorPos = -1;
 
-    ImGui::SetNextWindowSize(ImVec2(880.0f, 520.0f), ImGuiCond_Once);
+    std::string exprModalTitle = std::string(tr("expr_modal.title")) + "###ExprEditorModal";
+    if (m_showExpressionModal)
+        ImGui::OpenPopup(exprModalTitle.c_str());
+
+    ImGui::SetNextWindowSize(ImVec2(1220.0f, 820.0f), ImGuiCond_Once);
     ImGui::SetNextWindowSizeConstraints(ImVec2(680.0f, 400.0f), ImVec2(1600.0f, 900.0f));
 
-    if (ImGui::BeginPopupModal("Éditeur Avancé d'Expression SQL", &m_showExpressionModal, ImGuiWindowFlags_None))
+    if (ImGui::BeginPopupModal(exprModalTitle.c_str(), &m_showExpressionModal, ImGuiWindowFlags_None))
     {
-        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "%s  Concepteur d'Expression & Transformation SQL (PostgreSQL)", ICON_LC_CPU);
+        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "%s  %s", ICON_LC_CPU, tr("expr_modal.subtitle"));
         ImGui::Separator();
         ImGui::Spacing();
 
         // Nom de la colonne de sortie (Alias) + Case Agrégat
         ImGui::AlignTextToFramePadding();
-        ImGui::Text("Alias de sortie (AS) :");
+        ImGui::Text("%s", tr("expr_modal.alias_label"));
         ImGui::SameLine();
         ImGui::SetNextItemWidth(260.0f);
-        ImGui::InputTextWithHint("##ExprAliasInput", "ex: nom_complet, total_ttc...", m_exprAliasBuf, IM_ARRAYSIZE(m_exprAliasBuf));
+        ImGui::InputTextWithHint("##ExprAliasInput", tr("expr_modal.alias_hint"), m_exprAliasBuf, IM_ARRAYSIZE(m_exprAliasBuf));
 
-        ImGui::SameLine(0.0f, 25.0f);
-        ImGui::Checkbox("Fonction d'agrégation (active le GROUP BY auto)", &m_exprIsAggregate);
+        ImGui::SameLine(0.0f, 20.0f);
+        std::string aggCheckLabel = std::string(tr("expr_modal.aggregate_check")) + "###ExprAggCheck";
+        if (ImGui::Checkbox(aggCheckLabel.c_str(), &m_exprIsAggregate) && m_exprIsAggregate)
+            m_exprIsWindow = false;
+
+        ImGui::SameLine(0.0f, 20.0f);
+        std::string winCheckLabel = std::string(tr("expr_modal.window_check")) + "###ExprWinCheck";
+        if (ImGui::Checkbox(winCheckLabel.c_str(), &m_exprIsWindow) && m_exprIsWindow)
+            m_exprIsAggregate = false;
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -1688,22 +1833,37 @@ void Application::renderExpressionEditorModal()
 
         // COLONNE 1 (GAUCHE) : Colonnes du graphe disponibles pour insertion rapide
         ImGui::BeginChild("ExprFieldsPalette", ImVec2(240.0f, bodyHeight), true);
-        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "CHAMPS DU GRAPHE");
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s", tr("where_modal.graph_fields_header"));
         ImGui::Separator();
         ImGui::Spacing();
 
-        auto appendSnippetToFormula = [&](const std::string &snippet)
+        // Position du curseur mémorisée en continu pour l'éditeur de formule
+        static int s_exprCursorPos = 0;
+        static int s_pendingCursorPos = -1;
+
+        auto insertSnippetAtCursor = [&](const std::string &snippet)
         {
-            size_t curLen = strlen(m_exprFormulaBuf);
-            if (curLen + snippet.length() + 1 < sizeof(m_exprFormulaBuf))
+            std::string currentText(m_exprFormulaBuf);
+            int insertPos = std::clamp(s_exprCursorPos, 0, static_cast<int>(currentText.size()));
+
+            currentText.insert(insertPos, snippet);
+
+            if (currentText.size() < sizeof(m_exprFormulaBuf))
             {
-                strcat(m_exprFormulaBuf, snippet.c_str());
+                snprintf(m_exprFormulaBuf, sizeof(m_exprFormulaBuf), "%s", currentText.c_str());
+                // Place le curseur juste après le texte inséré (ou à l'intérieur des parenthèses vides "()")
+                size_t emptyParens = snippet.find("()");
+                if (emptyParens != std::string::npos)
+                    s_pendingCursorPos = insertPos + static_cast<int>(emptyParens) + 1;
+                else
+                    s_pendingCursorPos = insertPos + static_cast<int>(snippet.size());
+                s_exprCursorPos = s_pendingCursorPos;
             }
         };
 
         if (m_visualQueryNodes.empty())
         {
-            ImGui::TextDisabled("Aucune table ou CTE sur le canevas.");
+            ImGui::TextDisabled("%s", tr("expr_modal.empty_canvas_hint"));
         }
         else
         {
@@ -1728,15 +1888,15 @@ void Application::renderExpressionEditorModal()
                                     std::string qual = prefix + col.name;
                                     if (ImGui::Selectable(qual.c_str()))
                                     {
-                                        appendSnippetToFormula(qual);
+                                        insertSnippetAtCursor(qual);
                                     }
-                                    ImGui::SetItemTooltip("Cliquer pour insérer '%s' (%s)", qual.c_str(), col.dataType.c_str());
+                                    ImGui::SetItemTooltip("%s '%s' (%s)", tr("expr_modal.insert_col_tooltip"), qual.c_str(), col.dataType.c_str());
                                 }
                                 break;
                             }
                         }
                         if (!foundCte)
-                            ImGui::TextDisabled("(Schéma CTE introuvable)");
+                            ImGui::TextDisabled("%s", tr("expr_modal.cte_schema_not_found"));
                         ImGui::TreePop();
                     }
                 }
@@ -1751,9 +1911,9 @@ void Application::renderExpressionEditorModal()
                             std::string qual = prefix + col.name();
                             if (ImGui::Selectable(qual.c_str()))
                             {
-                                appendSnippetToFormula(qual);
+                                insertSnippetAtCursor(qual);
                             }
-                            ImGui::SetItemTooltip("Cliquer pour insérer '%s' (%s)", qual.c_str(), col.type().c_str());
+                            ImGui::SetItemTooltip("%s '%s' (%s)", tr("expr_modal.insert_col_tooltip"), qual.c_str(), col.type().c_str());
                         }
                         ImGui::TreePop();
                     }
@@ -1767,22 +1927,50 @@ void Application::renderExpressionEditorModal()
         // COLONNE 2 (CENTRE) : Zone d'édition de la formule SQL
         float centerWidth = ImGui::GetContentRegionAvail().x - 245.0f;
         ImGui::BeginChild("ExprEditorZone", ImVec2(centerWidth, bodyHeight), true);
-        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "FORMULE SQL DE TRANSFORMATION");
+        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s", tr("expr_modal.formula_header"));
         ImGui::Separator();
         ImGui::Spacing();
 
-        float textAreaHeight = ImGui::GetContentRegionAvail().y - 35.0f;
-        ImGui::InputTextMultiline("##ExprFormulaMultiline", m_exprFormulaBuf, IM_ARRAYSIZE(m_exprFormulaBuf),
-                                  ImVec2(-1.0f, textAreaHeight), ImGuiInputTextFlags_AllowTabInput);
+        auto exprCursorCallback = [](ImGuiInputTextCallbackData *data) -> int
+        {
+            if (s_pendingCursorPos >= 0)
+            {
+                int targetPos = std::clamp(s_pendingCursorPos, 0, data->BufTextLen);
+                data->CursorPos = targetPos;
+                data->SelectionStart = targetPos;
+                data->SelectionEnd = targetPos;
+                s_pendingCursorPos = -1;
+            }
+            else
+            {
+                s_exprCursorPos = data->CursorPos;
+            }
+            return 0;
+        };
 
-        ImGui::TextDisabled("Astuce : Cliquez sur un champ à gauche ou une fonction à droite pour l'insérer.");
+        float textAreaHeight = ImGui::GetContentRegionAvail().y - 35.0f;
+        ImGui::InputTextMultiline(
+            "##ExprFormulaMultiline",
+            m_exprFormulaBuf,
+            IM_ARRAYSIZE(m_exprFormulaBuf),
+            ImVec2(-1.0f, textAreaHeight),
+            ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackAlways,
+            exprCursorCallback);
+
+        // Si une insertion vient d'avoir lieu via un clic dans les palettes latérales, redonne le focus à l'éditeur
+        if (s_pendingCursorPos >= 0)
+        {
+            ImGui::SetKeyboardFocusHere(-1);
+        }
+
+        ImGui::TextDisabled("%s", tr("expr_modal.formula_tip"));
         ImGui::EndChild();
 
         ImGui::SameLine();
 
         // COLONNE 3 (DROITE) : Catalogue de fonctions SQL prêtes à l'emploi
         ImGui::BeginChild("ExprFunctionsCatalog", ImVec2(235.0f, bodyHeight), true);
-        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "FONCTIONS SQL");
+        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s", tr("expr_modal.functions_header"));
         ImGui::Separator();
         ImGui::Spacing();
 
@@ -1791,35 +1979,55 @@ void Application::renderExpressionEditorModal()
             const char *label;
             const char *snippet;
             bool isAgg;
+            bool isWin;
         };
         const SqlFuncTemplate funcs[] = {
-            {"CONCAT(a, ' ', b)", "CONCAT(, ' ', )", false},
-            {"UPPER(str)", "UPPER()", false},
-            {"LOWER(str)", "LOWER()", false},
-            {"TRIM(str)", "TRIM()", false},
-            {"SUBSTRING(str, 1, 3)", "SUBSTRING(, 1, 3)", false},
-            {"COALESCE(val, 0)", "COALESCE(, 0)", false},
-            {"CASE WHEN ... END", "CASE WHEN  THEN  ELSE  END", false},
-            {"ROUND(num, 2)", "ROUND(, 2)", false},
-            {"CAST(... AS NUMERIC)", "CAST( AS NUMERIC)", false},
-            {"EXTRACT(YEAR FROM d)", "EXTRACT(YEAR FROM )", false},
-            {"TO_CHAR(d, 'YYYY-MM')", "TO_CHAR(, 'YYYY-MM')", false},
-            {"SUM(col)", "SUM()", true},
-            {"COUNT(col)", "COUNT()", true},
-            {"COUNT(DISTINCT col)", "COUNT(DISTINCT )", true},
-            {"AVG(col)", "AVG()", true},
-            {"MIN(col)", "MIN()", true},
-            {"MAX(col)", "MAX()", true}};
+            // Fonctions scalaires
+            {"CONCAT(a, ' ', b)", "CONCAT(, ' ', )", false, false},
+            {"UPPER(str)", "UPPER()", false, false},
+            {"LOWER(str)", "LOWER()", false, false},
+            {"TRIM(str)", "TRIM()", false, false},
+            {"SUBSTRING(str, 1, 3)", "SUBSTRING(, 1, 3)", false, false},
+            {"COALESCE(val, 0)", "COALESCE(, 0)", false, false},
+            {"CASE WHEN ... END", "CASE WHEN  THEN  ELSE  END", false, false},
+            {"ROUND(num, 2)", "ROUND(, 2)", false, false},
+            {"CAST(... AS NUMERIC)", "CAST( AS NUMERIC)", false, false},
+            {"EXTRACT(YEAR FROM d)", "EXTRACT(YEAR FROM )", false, false},
+            {"TO_CHAR(d, 'YYYY-MM')", "TO_CHAR(, 'YYYY-MM')", false, false},
+            // Fonctions d'agrégation
+            {"SUM(col)", "SUM()", true, false},
+            {"COUNT(col)", "COUNT()", true, false},
+            {"COUNT(DISTINCT col)", "COUNT(DISTINCT )", true, false},
+            {"AVG(col)", "AVG()", true, false},
+            {"MIN(col)", "MIN()", true, false},
+            {"MAX(col)", "MAX()", true, false},
+            // Fonctions de fenêtrage (Window Functions)
+            {"ROW_NUMBER() OVER (...)", "ROW_NUMBER() OVER (PARTITION BY  ORDER BY )", false, true},
+            {"RANK() OVER (...)", "RANK() OVER (PARTITION BY  ORDER BY )", false, true},
+            {"DENSE_RANK() OVER (...)", "DENSE_RANK() OVER (PARTITION BY  ORDER BY )", false, true},
+            {"LAG(col, 1) OVER (...)", "LAG(, 1) OVER (PARTITION BY  ORDER BY )", false, true},
+            {"LEAD(col, 1) OVER (...)", "LEAD(, 1) OVER (PARTITION BY  ORDER BY )", false, true},
+            {"SUM(col) OVER (...)", "SUM() OVER (PARTITION BY  ORDER BY )", false, true},
+            {"AVG(col) OVER (...)", "AVG() OVER (PARTITION BY )", false, true},
+            {"FIRST_VALUE(col) OVER (...)", "FIRST_VALUE() OVER (PARTITION BY  ORDER BY )", false, true}};
 
         for (const auto &fn : funcs)
         {
             if (ImGui::Selectable(fn.label))
             {
-                appendSnippetToFormula(fn.snippet);
+                insertSnippetAtCursor(fn.snippet);
                 if (fn.isAgg)
+                {
                     m_exprIsAggregate = true;
+                    m_exprIsWindow = false;
+                }
+                else if (fn.isWin)
+                {
+                    m_exprIsWindow = true;
+                    m_exprIsAggregate = false;
+                }
             }
-            ImGui::SetItemTooltip("Insérer : %s", fn.snippet);
+            ImGui::SetItemTooltip("%s : %s", tr("expr_modal.insert_func_tooltip"), fn.snippet);
         }
         ImGui::EndChild();
 
@@ -1828,7 +2036,7 @@ void Application::renderExpressionEditorModal()
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 230.0f);
 
-        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
         {
             m_showExpressionModal = false;
             ImGui::CloseCurrentPopup();
@@ -1840,10 +2048,14 @@ void Application::renderExpressionEditorModal()
         if (!isValid)
             ImGui::BeginDisabled();
 
-        if (ImGui::Button("Valider", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.confirm"), ImVec2(120.0f, 0.0f)))
         {
             std::string aliasStr(m_exprAliasBuf);
             std::string formulaStr(m_exprFormulaBuf);
+
+            bool detectedOver = (formulaStr.find("OVER") != std::string::npos || formulaStr.find("over") != std::string::npos);
+            bool finalIsWin = m_exprIsWindow || detectedOver;
+            bool finalIsAgg = finalIsWin ? false : m_exprIsAggregate;
 
             if (m_editingProjectionIndex >= 0 && m_editingProjectionIndex < static_cast<int>(m_projectionItems.size()))
             {
@@ -1870,7 +2082,6 @@ void Application::renderExpressionEditorModal()
         ImGui::EndPopup();
     }
 }
-
 
 void Application::openCtePreviewModal(const std::string &cteQueryName)
 {
@@ -1951,9 +2162,11 @@ void Application::openCtePreviewModal(const std::string &cteQueryName)
 
 void Application::renderCtePreviewModal()
 {
+    std::string ctePreviewTitle = std::string(tr("cte_preview.modal_title")) + "###CtePreviewModal";
+
     if (m_showCtePreviewModal)
     {
-        ImGui::OpenPopup("Aperçu Graphique de la CTE");
+        ImGui::OpenPopup(ctePreviewTitle.c_str());
         m_showCtePreviewModal = false; // Ouvre la popup une fois ; BeginPopupModal reste ouvert tant qu'on n'appelle pas CloseCurrentPopup()
     }
 
@@ -1962,18 +2175,19 @@ void Application::renderCtePreviewModal()
     ImGui::SetNextWindowSize(ImVec2(980.0f, 640.0f), ImGuiCond_Appearing);
 
     bool isOpen = true;
-    if (ImGui::BeginPopupModal("Aperçu Graphique de la CTE", &isOpen))
+    if (ImGui::BeginPopupModal(ctePreviewTitle.c_str(), &isOpen))
     {
         if (!isOpen)
         {
             ImGui::CloseCurrentPopup();
         }
         // Barre d'en-tête avec titre et bouton Fermer
-        ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.25f, 1.0f), "%s  Sous-requête CTE : %s", ICON_LC_FILE_TEXT, m_previewCteName.c_str());
+        ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.25f, 1.0f), "%s  %s : %s", ICON_LC_FILE_TEXT, tr("cte_preview.subquery_label"), m_previewCteName.c_str());
 
         float rightBtnWidth = 295.0f;
         ImGui::SameLine(ImGui::GetContentRegionAvail().x - rightBtnWidth + 16.0f);
-        if (ImGui::Button((std::string(ICON_LC_FOLDER_OPEN) + "  Ouvrir pour éditer").c_str(), ImVec2(185.0f, 26.0f)))
+        std::string openEditLabel = std::string(ICON_LC_FOLDER_OPEN) + "  " + tr("cte_preview.btn_open_edit") + "###CteOpenEditBtn";
+        if (ImGui::Button(openEditLabel.c_str(), ImVec2(185.0f, 26.0f)))
         {
             auto it = std::find_if(m_savedQueries.begin(), m_savedQueries.end(),
                                    [this](const SavedQuery &q)
@@ -1987,7 +2201,7 @@ void Application::renderCtePreviewModal()
         }
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.25f, 0.25f, 0.90f));
-        if (ImGui::Button("Fermer", ImVec2(95.0f, 26.0f)))
+        if (ImGui::Button(tr("btn.close"), ImVec2(95.0f, 26.0f)))
         {
             m_showCtePreviewModal = false;
             ImGui::CloseCurrentPopup();
@@ -1998,7 +2212,7 @@ void Application::renderCtePreviewModal()
 
         if (m_previewCteNodes.empty())
         {
-            ImGui::TextDisabled("Cette requête ne possède pas de graphe visuel enregistré. Aperçu SQL :");
+            ImGui::TextDisabled("%s", tr("cte_preview.no_visual_graph"));
             std::string sqlBuf = m_previewCteSql;
             ImGui::InputTextMultiline("##CtePreviewSqlOnly", sqlBuf.data(), sqlBuf.size() + 1, ImVec2(-1.0f, -1.0f), ImGuiInputTextFlags_ReadOnly);
         }
@@ -2028,9 +2242,9 @@ void Application::renderCtePreviewModal()
                 if (node.isCTE)
                     ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.25f, 1.0f), "%s  CTE: %s", ICON_LC_FILE_TEXT, node.datasetName.c_str());
                 else
-                    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Table: %s", ICON_LC_DATABASE, node.datasetName.c_str());
+                    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  %s: %s", ICON_LC_DATABASE, tr("node.table_prefix"), node.datasetName.c_str());
 
-                ImGui::TextDisabled("  Alias : %s", node.alias.c_str());
+                ImGui::TextDisabled("  %s : %s", tr("node.alias_label"), node.alias.c_str());
                 ImGui::Spacing();
                 ImGui::Dummy(ImVec2(0.0f, 2.0f));
 
@@ -2088,7 +2302,7 @@ void Application::renderCtePreviewModal()
                     ed::SetNodePosition(pred.id, pred.position);
                 }
                 ed::BeginNode(pred.id);
-                ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f), "%s  Filtre WHERE", ICON_LC_FILTER);
+                ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f), "%s  %s", ICON_LC_FILTER, tr("filter.node_title"));
                 uintptr_t predInPin = pred.id + 500000;
                 ed::BeginPin(predInPin, ed::PinKind::Input);
                 ImGui::Text("%s  '%s'", pred.targetColumn.c_str(), pred.value.c_str());
@@ -2102,7 +2316,6 @@ void Application::renderCtePreviewModal()
             }
 
             // 3. Rendu des Jointures avec badge central (positionné une seule fois)
-            static uintptr_t s_lastCenteredPreviewId = 0;
             for (const auto &link : m_previewCteLinks)
             {
                 const char *joinLabel = "INNER JOIN";
@@ -2173,7 +2386,7 @@ void Application::renderCtePreviewModal()
                 }
 
                 ed::BeginNode(999999);
-                ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s  Projection SELECT", ICON_LC_LAYERS);
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s  %s", ICON_LC_LAYERS, tr("projection.node_title"));
                 ImGui::Spacing();
                 ImGui::Dummy(ImVec2(0.0f, 2.0f));
 
@@ -2197,5 +2410,3 @@ void Application::renderCtePreviewModal()
         ImGui::EndPopup();
     }
 }
-
-

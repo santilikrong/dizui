@@ -1,4 +1,6 @@
 #include "Application.hpp"
+#include <Localization.hpp>
+#include <SqlEditorHelpers.hpp>
 #include "IconsLucide.hpp"
 #include <imgui_internal.h>
 #include <algorithm>
@@ -39,7 +41,7 @@ void Application::renderProjectExplorerTree()
     switch (m_currentTab)
     {
     case ActiveTab::Project:
-        drawLargeIconText(ICON_LC_BLOCKS, "Espace Projet", 14.0f);
+        drawLargeIconText(ICON_LC_BLOCKS, tr("explorer.project_space"), 14.0f);
         ImGui::Separator();
         ImGui::Spacing();
         if (m_activeProject)
@@ -48,17 +50,18 @@ void Application::renderProjectExplorerTree()
             ImGui::SetNextItemOpen(true, ImGuiCond_Once);
             if (ImGui::TreeNode(project_root_label.c_str()))
             {
-                drawLargeIconText(ICON_LC_FOLDER_OPEN, ("Chemin : " + m_activeProject->path()).c_str(), 14.0f);
+                drawLargeIconText(ICON_LC_FOLDER_OPEN, (std::string(tr("explorer.path_label")) + " : " + m_activeProject->path()).c_str(), 14.0f);
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
 
                 // 1. Connexions Physiques
                 ImGui::PushID("PhysConnsRoot");
-                bool phys_open = ImGui::TreeNode("Connexions Physiques");
+                std::string physRootLabel = std::string(tr("explorer.phys_conns_root")) + "###PhysConnsTree";
+                bool phys_open = ImGui::TreeNode(physRootLabel.c_str());
                 if (ImGui::BeginPopupContextItem("PhysConnsRootContext", ImGuiPopupFlags_MouseButtonRight))
                 {
-                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  Créer une connexion physique...").c_str()))
+                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  " + tr("explorer.ctx_create_phys")).c_str()))
                     {
                         m_isEditingPhysConn = false;
                         m_originalPhysConnName = "";
@@ -85,7 +88,7 @@ void Application::renderProjectExplorerTree()
 
                         if (ImGui::BeginPopupContextItem("PhysConnItemContext", ImGuiPopupFlags_MouseButtonRight))
                         {
-                            if (ImGui::MenuItem("Éditer la connexion"))
+                            if (ImGui::MenuItem(tr("explorer.ctx_edit_conn")))
                             {
                                 m_isEditingPhysConn = true;
                                 m_originalPhysConnName = name;
@@ -110,7 +113,7 @@ void Application::renderProjectExplorerTree()
                                 }
                             }
 
-                            if (ImGui::MenuItem("Renommer la connexion"))
+                            if (ImGui::MenuItem(tr("explorer.ctx_rename_conn")))
                             {
                                 m_renamingPhysConnOldName = name;
                                 strncpy(m_renamePhysConnBuf, name.c_str(), sizeof(m_renamePhysConnBuf) - 1);
@@ -119,7 +122,7 @@ void Application::renderProjectExplorerTree()
 
                             ImGui::Separator();
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
-                            if (ImGui::MenuItem("Supprimer la connexion"))
+                            if (ImGui::MenuItem(tr("explorer.ctx_delete_conn")))
                             {
                                 physToDelete = name;
                             }
@@ -139,10 +142,11 @@ void Application::renderProjectExplorerTree()
 
                 // 2. Passerelles Logiques
                 ImGui::PushID("LogConnsRoot");
-                bool log_open = ImGui::TreeNode("Passerelles Logiques");
+                std::string logRootLabel = std::string(tr("explorer.log_conns_root")) + "###LogConnsTree";
+                bool log_open = ImGui::TreeNode(logRootLabel.c_str());
                 if (ImGui::BeginPopupContextItem("LogConnsRootContext", ImGuiPopupFlags_MouseButtonRight))
                 {
-                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  Créer une connexion logique...").c_str()))
+                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  " + tr("explorer.ctx_create_log")).c_str()))
                     {
                         m_isEditingLogConn = false;
                         m_originalLogConnName = "";
@@ -165,7 +169,7 @@ void Application::renderProjectExplorerTree()
 
                         if (ImGui::BeginPopupContextItem("LogConnItemContext", ImGuiPopupFlags_MouseButtonRight))
                         {
-                            if (ImGui::MenuItem("Éditer la connexion"))
+                            if (ImGui::MenuItem(tr("explorer.ctx_edit_conn")))
                             {
                                 m_isEditingLogConn = true;
                                 m_originalLogConnName = name;
@@ -177,7 +181,7 @@ void Application::renderProjectExplorerTree()
                                 m_showLogConnModal = true;
                             }
 
-                            if (ImGui::MenuItem("Renommer la connexion"))
+                            if (ImGui::MenuItem(tr("explorer.ctx_rename_conn")))
                             {
                                 m_renamingLogConnOldName = name;
                                 strncpy(m_renameLogConnBuf, name.c_str(), sizeof(m_renameLogConnBuf) - 1);
@@ -186,7 +190,7 @@ void Application::renderProjectExplorerTree()
 
                             ImGui::Separator();
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
-                            if (ImGui::MenuItem("Supprimer la connexion"))
+                            if (ImGui::MenuItem(tr("explorer.ctx_delete_conn")))
                             {
                                 logToDelete = name;
                             }
@@ -200,8 +204,8 @@ void Application::renderProjectExplorerTree()
                             {
                                 if (ImGui::TreeNode(envName.c_str()))
                                 {
-                                    drawLargeIconText(ICON_LC_SERVER, ("Cluster : " + physConn.name_).c_str(), 12.0f);
-                                    drawLargeIconText(ICON_LC_DATABASE, ("Base    : " + physConn.dbname_).c_str(), 12.0f);
+                                    drawLargeIconText(ICON_LC_SERVER, (std::string(tr("explorer.cluster_label")) + " : " + physConn.name_).c_str(), 12.0f);
+                                    drawLargeIconText(ICON_LC_DATABASE, (std::string(tr("explorer.db_label")) + " : " + physConn.dbname_).c_str(), 12.0f);
                                     ImGui::TreePop();
                                 }
                             }
@@ -225,10 +229,11 @@ void Application::renderProjectExplorerTree()
 
                 // 3. Datasets (Tables)
                 ImGui::PushID("DatasetsHeaderNode");
-                bool datasets_open = ImGui::TreeNode("Datasets (Tables)");
+                std::string datasetsRootLabel = std::string(tr("explorer.datasets_root")) + "###DatasetsTree";
+                bool datasets_open = ImGui::TreeNode(datasetsRootLabel.c_str());
                 if (ImGui::BeginPopupContextItem("DatasetsContextMenu", ImGuiPopupFlags_MouseButtonRight))
                 {
-                    if (ImGui::Selectable((std::string(ICON_LC_REFRESH_CW) + "  Reverse Datasets...").c_str()))
+                    if (ImGui::Selectable((std::string(ICON_LC_REFRESH_CW) + "  " + tr("explorer.ctx_reverse_datasets")).c_str()))
                     {
                         m_showReverseModal = true;
                         m_reverseSelectedObject = "";
@@ -260,7 +265,9 @@ void Application::renderProjectExplorerTree()
                 ImGui::PopID();
 
                 // 4. Opérateurs de flux
-                if (ImGui::TreeNode("Opérateurs de flux"))
+                // 4. Opérateurs de flux
+                std::string flowOpsLabel = std::string(tr("explorer.flow_ops_root")) + "###FlowOpsTree";
+                if (ImGui::TreeNode(flowOpsLabel.c_str()))
                 {
                     ImGui::PushID("FilterDragRow");
                     ImGui::Selectable("##select_filter_node", false, ImGuiSelectableFlags_AllowOverlap, ImVec2(0, ImGui::GetTextLineHeightWithSpacing()));
@@ -268,21 +275,22 @@ void Application::renderProjectExplorerTree()
                     {
                         std::string payload_type = "WHERE_FILTER";
                         ImGui::SetDragDropPayload("DND_PREDICATE_NODE", payload_type.c_str(), payload_type.size() + 1);
-                        drawLargeIconText(ICON_LC_FILTER, "Filtre (Clause WHERE)", 12.0f);
+                        drawLargeIconText(ICON_LC_FILTER, tr("explorer.where_filter_item"), 12.0f);
                         ImGui::EndDragDropSource();
                     }
                     ImGui::SetCursorScreenPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMin().y));
-                    drawLargeIconText(ICON_LC_FILTER, "Filtre (Clause WHERE)", 12.0f);
+                    drawLargeIconText(ICON_LC_FILTER, tr("explorer.where_filter_item"), 12.0f);
                     ImGui::PopID();
                     ImGui::TreePop();
                 }
 
                 // 5. Requêtes Enregistrées
-                if (ImGui::TreeNode("Requêtes Enregistrées"))
+                std::string savedQueriesLabel = std::string(tr("explorer.saved_queries_root")) + "###SavedQueriesTree";
+                if (ImGui::TreeNode(savedQueriesLabel.c_str()))
                 {
                     if (m_savedQueries.empty())
                     {
-                        ImGui::TextDisabled("   (Aucune requête)");
+                        ImGui::TextDisabled("   %s", tr("explorer.no_queries"));
                     }
                     else
                     {
@@ -302,13 +310,13 @@ void Application::renderProjectExplorerTree()
 
                             if (ImGui::BeginPopupContextItem("QueryContextMenu"))
                             {
-                                ImGui::TextDisabled("%s Requête : %s", ICON_LC_FILE_TEXT, saved.name.c_str());
+                                ImGui::TextDisabled("%s %s : %s", ICON_LC_FILE_TEXT, tr("explorer.query_prefix"), saved.name.c_str());
                                 ImGui::Separator();
 
-                                if (ImGui::MenuItem((std::string(ICON_LC_FOLDER_OPEN) + "  Éditer dans le designer").c_str()))
+                                if (ImGui::MenuItem((std::string(ICON_LC_FOLDER_OPEN) + "  " + tr("explorer.ctx_edit_designer")).c_str()))
                                     loadQueryIntoVisualDesigner(saved);
 
-                                if (ImGui::MenuItem((std::string(ICON_LC_SEARCH) + "  Inspecter le SQL et le Schéma...").c_str()))
+                                if (ImGui::MenuItem((std::string(ICON_LC_SEARCH) + "  " + tr("explorer.ctx_inspect_sql")).c_str()))
                                 {
                                     m_inspectingQueryIndex = i;
                                     m_showInspectQueryModal = true;
@@ -316,7 +324,7 @@ void Application::renderProjectExplorerTree()
 
                                 ImGui::Separator();
 
-                                if (ImGui::MenuItem((std::string(ICON_LC_TYPE) + "  Renommer...").c_str()))
+                                if (ImGui::MenuItem((std::string(ICON_LC_TYPE) + "  " + tr("explorer.ctx_rename")).c_str()))
                                 {
                                     m_renamingQueryIndex = i;
                                     strncpy(m_renameQueryBuf, saved.name.c_str(), sizeof(m_renameQueryBuf) - 1);
@@ -324,13 +332,13 @@ void Application::renderProjectExplorerTree()
                                     m_showRenameQueryModal = true;
                                 }
 
-                                if (ImGui::MenuItem((std::string(ICON_LC_COPY) + "  Dupliquer").c_str()))
+                                if (ImGui::MenuItem((std::string(ICON_LC_COPY) + "  " + tr("explorer.ctx_duplicate")).c_str()))
                                     queryIndexToDuplicate = i;
 
                                 ImGui::Separator();
 
                                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
-                                if (ImGui::MenuItem((std::string(ICON_LC_TRASH) + "  Supprimer du projet...").c_str()))
+                                if (ImGui::MenuItem((std::string(ICON_LC_TRASH) + "  " + tr("explorer.ctx_delete_project")).c_str()))
                                 {
                                     m_deletingQueryIndex = i;
                                     m_showDeleteQueryModal = true;
@@ -343,9 +351,9 @@ void Application::renderProjectExplorerTree()
                             if (ImGui::IsItemHovered())
                             {
                                 if (!saved.description.empty())
-                                    ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options\n%s", saved.description.c_str());
+                                    ImGui::SetItemTooltip("%s\n%s", tr("explorer.query_hover_tooltip"), saved.description.c_str());
                                 else
-                                    ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options");
+                                    ImGui::SetItemTooltip("%s", tr("explorer.query_hover_tooltip"));
                             }
 
                             if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
@@ -364,7 +372,7 @@ void Application::renderProjectExplorerTree()
                         if (queryIndexToDuplicate >= 0 && queryIndexToDuplicate < static_cast<int>(m_savedQueries.size()))
                         {
                             SavedQuery copy = m_savedQueries[queryIndexToDuplicate];
-                            std::string baseName = copy.name + "_copie";
+                            std::string baseName = copy.name + tr("explorer.copy_suffix");
                             std::string finalName = baseName;
                             int suffix = 2;
                             while (std::any_of(m_savedQueries.begin(), m_savedQueries.end(),
@@ -382,10 +390,11 @@ void Application::renderProjectExplorerTree()
 
                 // 6. Tâches (Pipelines)
                 ImGui::PushID("TasksHeaderNode");
-                bool tasks_open = ImGui::TreeNode("Tâches (Pipelines)");
+                std::string tasksRootLabel = std::string(tr("explorer.tasks_root")) + "###TasksTree";
+                bool tasks_open = ImGui::TreeNode(tasksRootLabel.c_str());
                 if (ImGui::BeginPopupContextItem("TasksContextMenu", ImGuiPopupFlags_MouseButtonRight))
                 {
-                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  Nouvelle tâche...").c_str()))
+                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  " + tr("explorer.ctx_new_task")).c_str()))
                     {
                         m_showCreateTaskModal = true;
                         m_selectedQueryIndexForTask = -1;
@@ -399,7 +408,7 @@ void Application::renderProjectExplorerTree()
                 {
                     if (m_savedTasks.empty())
                     {
-                        ImGui::TextDisabled("   (Aucune tâche créée)");
+                        ImGui::TextDisabled("   %s", tr("explorer.no_tasks"));
                     }
                     else
                     {
@@ -427,10 +436,10 @@ void Application::renderProjectExplorerTree()
                             // 1. Menu contextuel clic droit sur la Tâche
                             if (ImGui::BeginPopupContextItem(("TaskItemCtx_" + task.name()).c_str(), ImGuiPopupFlags_MouseButtonRight))
                             {
-                                ImGui::TextDisabled("%s Pipeline : %s", ICON_LC_ACTIVITY, task.name().c_str());
+                                ImGui::TextDisabled("%s %s : %s", ICON_LC_ACTIVITY, tr("explorer.pipeline_prefix"), task.name().c_str());
                                 ImGui::Separator();
 
-                                if (ImGui::MenuItem((std::string(ICON_LC_EDIT) + "  Éditer les étapes...").c_str()))
+                                if (ImGui::MenuItem((std::string(ICON_LC_EDIT) + "  " + tr("explorer.ctx_edit_steps")).c_str()))
                                 {
                                     m_targetTaskName = task.name();
                                     m_editTaskUnits.clear();
@@ -439,14 +448,14 @@ void Application::renderProjectExplorerTree()
                                     m_showEditTaskModal = true;
                                 }
 
-                                if (ImGui::MenuItem((std::string(ICON_LC_TYPE) + "  Renommer...").c_str()))
+                                if (ImGui::MenuItem((std::string(ICON_LC_TYPE) + "  " + tr("explorer.ctx_rename")).c_str()))
                                 {
                                     m_targetTaskName = task.name();
                                     snprintf(m_editTaskNameBuf, sizeof(m_editTaskNameBuf), "%s", task.name().c_str());
                                     m_showRenameTaskModal = true;
                                 }
 
-                                if (ImGui::MenuItem((std::string(ICON_LC_COPY) + "  Dupliquer").c_str()))
+                                if (ImGui::MenuItem((std::string(ICON_LC_COPY) + "  " + tr("explorer.ctx_duplicate")).c_str()))
                                 {
                                     taskToDuplicate = task.name();
                                 }
@@ -454,7 +463,7 @@ void Application::renderProjectExplorerTree()
                                 ImGui::Separator();
 
                                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
-                                if (ImGui::MenuItem((std::string(ICON_LC_TRASH) + "  Supprimer").c_str()))
+                                if (ImGui::MenuItem((std::string(ICON_LC_TRASH) + "  " + tr("explorer.ctx_delete")).c_str()))
                                 {
                                     m_targetTaskName = task.name();
                                     m_showDeleteTaskModal = true;
@@ -468,20 +477,20 @@ void Application::renderProjectExplorerTree()
                             if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
                             {
                                 ImGui::SetDragDropPayload("DND_WORKFLOW_TASK_NODE", task.name().c_str(), task.name().length() + 1);
-                                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "%s  Planifier : %s", ICON_LC_ACTIVITY, task.name().c_str());
+                                ImGui::TextColored(ImVec4(0.4f, 0.75f, 1.0f, 1.0f), "%s  %s : %s", ICON_LC_ACTIVITY, tr("explorer.schedule_prefix"), task.name().c_str());
                                 ImGui::EndDragDropSource();
                             }
 
                             // 3. Info-bulle des étapes
                             if (ImGui::IsItemHovered())
                             {
-                                std::string tooltip_txt = "Pipeline : " + task.name() + "\nÉtapes séquentielles :";
+                                std::string tooltip_txt = std::string(tr("explorer.pipeline_prefix")) + " : " + task.name() + "\n" + tr("explorer.seq_steps_label");
                                 if (task.steps().empty())
-                                    tooltip_txt += "\n   (Aucune étape)";
+                                    tooltip_txt += std::string("\n   ") + tr("explorer.no_steps_item");
                                 else
                                 {
                                     for (const auto &[stepId, unit] : task.steps())
-                                        tooltip_txt += "\n   [Step " + std::to_string(stepId) + "] -> " + unit.name;
+                                        tooltip_txt += "\n   [" + std::string(tr("task.step_prefix")) + " " + std::to_string(stepId) + "] -> " + unit.name;
                                 }
                                 ImGui::SetItemTooltip("%s", tooltip_txt.c_str());
                             }
@@ -496,13 +505,14 @@ void Application::renderProjectExplorerTree()
                                                    { return t.name() == taskToDuplicate; });
                             if (it != m_savedTasks.end())
                             {
-                                std::string copyName = taskToDuplicate + "_copie";
+                                std::string baseCopyName = taskToDuplicate + tr("explorer.copy_suffix");
+                                std::string copyName = baseCopyName;
                                 int suffix = 2;
                                 while (std::any_of(m_savedTasks.begin(), m_savedTasks.end(),
                                                    [&copyName](const cppsqlx::Task &t)
                                                    { return t.name() == copyName; }))
                                 {
-                                    copyName = taskToDuplicate + "_copie_" + std::to_string(suffix++);
+                                    copyName = baseCopyName + "_" + std::to_string(suffix++);
                                 }
                                 cppsqlx::Task clonedTask(copyName);
                                 for (const auto &[stepId, unit] : it->steps())
@@ -518,16 +528,17 @@ void Application::renderProjectExplorerTree()
                 ImGui::PopID();
 
                 // 8. Workflows Enregistrés
-                if (ImGui::TreeNode("Workflows Enregistrés###SavedWorkflowsTreeNode"))
+                std::string savedWfLabel = std::string(tr("explorer.saved_workflows_root")) + "###SavedWorkflowsTreeNode";
+                if (ImGui::TreeNode(savedWfLabel.c_str()))
                 {
                     if (m_savedWorkflows.empty())
                     {
-                        ImGui::TextDisabled("   (Aucun workflow)");
+                        ImGui::TextDisabled("   %s", tr("explorer.no_workflows"));
                     }
                     else
                     {
                         int workflowIndexToDelete = -1;
-                        int totalWorkflows = (int)m_savedWorkflows.size();
+                        int totalWorkflows = static_cast<int>(m_savedWorkflows.size());
                         for (int i = 0; i < totalWorkflows; ++i)
                         {
                             auto &wf = m_savedWorkflows[i];
@@ -539,9 +550,9 @@ void Application::renderProjectExplorerTree()
                             }
                             if (ImGui::BeginPopupContextItem("WorkflowContextMenu"))
                             {
-                                if (ImGui::MenuItem("Éditer dans le designer"))
+                                if (ImGui::MenuItem(tr("explorer.ctx_edit_designer")))
                                     loadWorkflowIntoVisualDesigner(wf);
-                                if (ImGui::MenuItem("Renommer"))
+                                if (ImGui::MenuItem(tr("explorer.ctx_rename_simple")))
                                 {
                                     m_renamingWorkflowIndex = i;
                                     strncpy(m_renameWorkflowBuf, wf.name.c_str(), sizeof(m_renameWorkflowBuf) - 1);
@@ -550,7 +561,7 @@ void Application::renderProjectExplorerTree()
                                 }
                                 ImGui::Separator();
                                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
-                                if (ImGui::MenuItem("Supprimer du projet"))
+                                if (ImGui::MenuItem(tr("explorer.ctx_delete_project_simple")))
                                     workflowIndexToDelete = i;
                                 ImGui::PopStyleColor();
                                 ImGui::EndPopup();
@@ -558,9 +569,9 @@ void Application::renderProjectExplorerTree()
                             if (ImGui::IsItemHovered())
                             {
                                 if (!wf.description.empty())
-                                    ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options\n%s", wf.description.c_str());
+                                    ImGui::SetItemTooltip("%s\n%s", tr("explorer.query_hover_tooltip"), wf.description.c_str());
                                 else
-                                    ImGui::SetItemTooltip("Double-cliquer pour ouvrir | Clic droit pour options");
+                                    ImGui::SetItemTooltip("%s", tr("explorer.query_hover_tooltip"));
                             }
                             ImGui::SameLine(0.0f, 0.0f);
                             drawLargeIconText(ICON_LC_ACTIVITY, wf.name.c_str(), 12.0f);
@@ -576,31 +587,31 @@ void Application::renderProjectExplorerTree()
         }
         break;
     case ActiveTab::Search:
-        drawLargeIconText(ICON_LC_SEARCH, "Recherche Avancée", 14.0f);
+        drawLargeIconText(ICON_LC_SEARCH, tr("sidebar.search_title"), 14.0f);
         break;
     case ActiveTab::Git:
-        drawLargeIconText(ICON_LC_GIT_BRANCH, "Gestion des Sources", 14.0f);
+        drawLargeIconText(ICON_LC_GIT_BRANCH, tr("sidebar.git_title"), 14.0f);
         break;
     case ActiveTab::Package:
-        drawLargeIconText(ICON_LC_BOX, "Gestionnaire de Packages", 14.0f);
+        drawLargeIconText(ICON_LC_BOX, tr("sidebar.package_title"), 14.0f);
         break;
     case ActiveTab::Settings:
     {
-        drawLargeIconText(ICON_LC_SETTINGS, "Paramètres de l'Application", 14.0f);
+        drawLargeIconText(ICON_LC_SETTINGS, tr("sidebar.settings_title"), 14.0f);
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "APPARENCE & THÈME VISUEL");
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s", tr("settings.appearance_header"));
         ImGui::Spacing();
 
         const char *themeNames[] = {
-            "Sombre Moderne (Défaut)",
-            "Clair (Studio Light)",
-            "Nord (Arctique)",
-            "Dracula (Nocturne)"};
+            tr("settings.theme_dark_full"),
+            tr("settings.theme_light_full"),
+            tr("settings.theme_nord_full"),
+            tr("settings.theme_dracula_full")};
 
         int currentThemeIdx = static_cast<int>(m_currentTheme);
-        ImGui::Text("Palette de couleurs :");
+        ImGui::Text("%s", tr("settings.palette_label"));
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::Combo("##AppThemeSelector", &currentThemeIdx, themeNames, IM_ARRAYSIZE(themeNames)))
         {
@@ -615,18 +626,20 @@ void Application::renderProjectExplorerTree()
         auto drawThemePresetCard = [&](const char *label, AppTheme targetTheme, ImVec4 swatchColor)
         {
             bool isSelected = (m_currentTheme == targetTheme);
-            ImGui::ColorButton(("##swatch_" + std::string(label)).c_str(), swatchColor, ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker, ImVec2(18.0f, 18.0f));
+            int themeId = static_cast<int>(targetTheme);
+            ImGui::ColorButton(("##swatch_" + std::to_string(themeId)).c_str(), swatchColor, ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker, ImVec2(18.0f, 18.0f));
             ImGui::SameLine();
-            if (ImGui::Selectable(label, isSelected))
+            std::string itemLabel = std::string(label) + "###ThemePreset_" + std::to_string(themeId);
+            if (ImGui::Selectable(itemLabel.c_str(), isSelected))
             {
                 applyTheme(targetTheme);
             }
         };
 
-        drawThemePresetCard("Sombre Moderne", AppTheme::DarkModern, ImVec4(0.10f, 0.11f, 0.13f, 1.0f));
-        drawThemePresetCard("Clair", AppTheme::Light, ImVec4(0.95f, 0.96f, 0.98f, 1.0f));
-        drawThemePresetCard("Nord", AppTheme::Nord, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
-        drawThemePresetCard("Dracula", AppTheme::Dracula, ImVec4(0.16f, 0.16f, 0.21f, 1.0f));
+        drawThemePresetCard(tr("settings.theme_dark_short"), AppTheme::DarkModern, ImVec4(0.10f, 0.11f, 0.13f, 1.0f));
+        drawThemePresetCard(tr("settings.theme_light_short"), AppTheme::Light, ImVec4(0.95f, 0.96f, 0.98f, 1.0f));
+        drawThemePresetCard(tr("settings.theme_nord_short"), AppTheme::Nord, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
+        drawThemePresetCard(tr("settings.theme_dracula_short"), AppTheme::Dracula, ImVec4(0.16f, 0.16f, 0.21f, 1.0f));
 
         break;
     }
@@ -634,30 +647,30 @@ void Application::renderProjectExplorerTree()
     ImGui::End();
 }
 
-
 void Application::renderTaskManagementModals()
 {
     // =========================================================================
     // 1. MODALE D'ÉDITION / RÉORGANISATION DES ÉTAPES
     // =========================================================================
+    std::string editTaskTitle = std::string(tr("edit_task.modal_title")) + "###EditTaskStepsModal";
     if (m_showEditTaskModal)
-        ImGui::OpenPopup("Éditer les Étapes de la Tâche");
+        ImGui::OpenPopup(editTaskTitle.c_str());
 
     ImGui::SetNextWindowSize(ImVec2(560.0f, 470.0f), ImGuiCond_Appearing);
-    if (ImGui::BeginPopupModal("Éditer les Étapes de la Tâche", &m_showEditTaskModal, ImGuiWindowFlags_NoResize))
+    if (ImGui::BeginPopupModal(editTaskTitle.c_str(), &m_showEditTaskModal, ImGuiWindowFlags_NoResize))
     {
-        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  Pipeline : %s", ICON_LC_ACTIVITY, m_targetTaskName.c_str());
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s : %s", ICON_LC_ACTIVITY, tr("explorer.pipeline_prefix"), m_targetTaskName.c_str());
         ImGui::Separator();
         ImGui::Spacing();
 
         // Zone d'ajout d'une nouvelle étape depuis les requêtes enregistrées
-        ImGui::Text("Ajouter une nouvelle étape :");
+        ImGui::Text("%s", tr("edit_task.add_step_label"));
         static int s_editTaskQueryIdx = 0;
         static std::array<char, 256> s_editTaskNewStepName{};
 
         if (m_savedQueries.empty())
         {
-            ImGui::TextDisabled("  (Aucune requête enregistrée disponible dans le projet)");
+            ImGui::TextDisabled("  %s", tr("edit_task.no_saved_queries"));
         }
         else
         {
@@ -683,16 +696,16 @@ void Application::renderTaskManagementModals()
 
             ImGui::SameLine();
             ImGui::SetNextItemWidth(160.0f);
-            ImGui::InputTextWithHint("##EditTaskStepLabel", "Nom de l'étape...", s_editTaskNewStepName.data(), s_editTaskNewStepName.size());
+            ImGui::InputTextWithHint("##EditTaskStepLabel", tr("edit_task.step_name_hint"), s_editTaskNewStepName.data(), s_editTaskNewStepName.size());
 
             ImGui::SameLine();
-            if (ImGui::Button((std::string(ICON_LC_PLUS) + " Ajouter une étape").c_str(), ImVec2(145.0f, 0.0f)))
+            std::string addStepBtnLabel = std::string(ICON_LC_PLUS) + " " + tr("edit_task.btn_add_step") + "###EditTaskAddStepBtn";
+            if (ImGui::Button(addStepBtnLabel.c_str(), ImVec2(145.0f, 0.0f)))
             {
                 cppsqlx::UnitSelect newUnit{};
                 newUnit.name = (strlen(s_editTaskNewStepName.data()) > 0)
                                    ? std::string(s_editTaskNewStepName.data())
                                    : m_savedQueries[s_editTaskQueryIdx].name;
-                // NOTE : Remplacez la ligne ci-dessous par l'initialisation exacte de votre modale m_showCreateTaskModal
                 newUnit.query = cppsqlx::SelectQuery::fromJSON(m_savedQueries[s_editTaskQueryIdx].compiledSelectJson).value_or(cppsqlx::SelectQuery());
 
                 m_editTaskUnits.push_back(std::move(newUnit));
@@ -705,14 +718,14 @@ void Application::renderTaskManagementModals()
         ImGui::Spacing();
 
         // Liste ordonnée des étapes existantes
-        ImGui::Text("Séquence d'exécution (%d étape(s)) :", static_cast<int>(m_editTaskUnits.size()));
+        ImGui::Text("%s (%d %s) :", tr("edit_task.sequence_label"), static_cast<int>(m_editTaskUnits.size()), tr("edit_task.steps_unit"));
         ImGui::BeginChild("EditTaskStepsZone", ImVec2(-1.0f, 230.0f), true);
 
         int moveUp = -1, moveDown = -1, removeIdx = -1;
         for (int i = 0; i < static_cast<int>(m_editTaskUnits.size()); ++i)
         {
             ImGui::PushID(i);
-            ImGui::Text("[Step %d]  %s", i + 1, m_editTaskUnits[i].name.c_str());
+            ImGui::Text("[%s %d]  %s", tr("task.step_prefix"), i + 1, m_editTaskUnits[i].name.c_str());
 
             ImGui::SameLine(ImGui::GetContentRegionAvail().x - 95.0f);
             if (ImGui::SmallButton(ICON_LC_ARROW_UP) && i > 0)
@@ -739,7 +752,7 @@ void Application::renderTaskManagementModals()
         ImGui::EndChild();
         ImGui::Spacing();
 
-        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.save"), ImVec2(120.0f, 0.0f)))
         {
             auto it = std::find_if(m_savedTasks.begin(), m_savedTasks.end(),
                                    [this](const cppsqlx::Task &t)
@@ -757,7 +770,7 @@ void Application::renderTaskManagementModals()
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Annuler", ImVec2(110.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(110.0f, 0.0f)))
         {
             m_showEditTaskModal = false;
             ImGui::CloseCurrentPopup();
@@ -768,13 +781,14 @@ void Application::renderTaskManagementModals()
     // =========================================================================
     // 2. MODALE DE RENOMMAGE (AVEC MISE À JOUR DU WORKFLOW DESIGNER)
     // =========================================================================
+    std::string renTaskTitle = std::string(tr("rename_task.modal_title")) + "###RenameTaskModal";
     if (m_showRenameTaskModal)
-        ImGui::OpenPopup("Renommer la Tâche");
+        ImGui::OpenPopup(renTaskTitle.c_str());
 
     ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Appearing);
-    if (ImGui::BeginPopupModal("Renommer la Tâche", &m_showRenameTaskModal, ImGuiWindowFlags_NoResize))
+    if (ImGui::BeginPopupModal(renTaskTitle.c_str(), &m_showRenameTaskModal, ImGuiWindowFlags_NoResize))
     {
-        ImGui::Text("Nouveau nom pour '%s' :", m_targetTaskName.c_str());
+        ImGui::Text("%s '%s' :", tr("rename_task.new_name_for"), m_targetTaskName.c_str());
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##RenameTaskBuf", m_editTaskNameBuf, sizeof(m_editTaskNameBuf));
         ImGui::Spacing();
@@ -788,7 +802,7 @@ void Application::renderTaskManagementModals()
 
         if (!canRename)
             ImGui::BeginDisabled();
-        if (ImGui::Button("Valider", ImVec2(110.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.confirm"), ImVec2(110.0f, 0.0f)))
         {
             if (newName != m_targetTaskName)
             {
@@ -819,7 +833,7 @@ void Application::renderTaskManagementModals()
             ImGui::EndDisabled();
 
         ImGui::SameLine();
-        if (ImGui::Button("Annuler", ImVec2(110.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(110.0f, 0.0f)))
         {
             m_showRenameTaskModal = false;
             ImGui::CloseCurrentPopup();
@@ -830,17 +844,18 @@ void Application::renderTaskManagementModals()
     // =========================================================================
     // 3. MODALE DE CONFIRMATION DE SUPPRESSION
     // =========================================================================
+    std::string delTaskTitle = std::string(tr("delete_task.modal_title")) + "###DeleteTaskModal";
     if (m_showDeleteTaskModal)
-        ImGui::OpenPopup("Supprimer la Tâche");
+        ImGui::OpenPopup(delTaskTitle.c_str());
 
     ImGui::SetNextWindowSize(ImVec2(420.0f, 155.0f), ImGuiCond_Appearing);
-    if (ImGui::BeginPopupModal("Supprimer la Tâche", &m_showDeleteTaskModal, ImGuiWindowFlags_NoResize))
+    if (ImGui::BeginPopupModal(delTaskTitle.c_str(), &m_showDeleteTaskModal, ImGuiWindowFlags_NoResize))
     {
-        ImGui::TextWrapped("Supprimer définitivement la tâche '%s' du projet ?", m_targetTaskName.c_str());
+        ImGui::TextWrapped("%s '%s' %s", tr("delete_task.confirm_prefix"), m_targetTaskName.c_str(), tr("delete_task.confirm_suffix"));
         ImGui::Spacing();
 
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.22f, 0.22f, 1.0f));
-        if (ImGui::Button("Supprimer", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("explorer.ctx_delete"), ImVec2(120.0f, 0.0f)))
         {
             std::erase_if(m_savedTasks, [this](const cppsqlx::Task &t)
                           { return t.name() == m_targetTaskName; });
@@ -851,7 +866,7 @@ void Application::renderTaskManagementModals()
         ImGui::PopStyleColor();
 
         ImGui::SameLine();
-        if (ImGui::Button("Annuler", ImVec2(110.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(110.0f, 0.0f)))
         {
             m_targetTaskName.clear();
             m_showDeleteTaskModal = false;
@@ -861,112 +876,180 @@ void Application::renderTaskManagementModals()
     }
 }
 
-
 void Application::renderQueryInspectAndDeleteModals()
 {
     // =========================================================================
-    // 1. MODALE D'INSPECTION DU SQL ET DU SCHÉMA DÉDUIT (LIMIT 0)
+    // MODALE : INSPECTER LE SQL ET LE SCHÉMA D'UNE REQUÊTE ENREGISTRÉE
     // =========================================================================
-    if (m_showInspectQueryModal)
-        ImGui::OpenPopup("Inspecter la Requête");
+    std::string inspectModalTitle = std::string(tr("inspect_query.modal_title")) + "###InspectQueryModal";
+    if (m_showInspectQueryModal && m_inspectingQueryIndex >= 0 && m_inspectingQueryIndex < static_cast<int>(m_savedQueries.size()))
+    {
+        ImGui::OpenPopup(inspectModalTitle.c_str());
+    }
 
-    ImGui::SetNextWindowSize(ImVec2(620.0f, 440.0f), ImGuiCond_Appearing);
-    if (ImGui::BeginPopupModal("Inspecter la Requête", &m_showInspectQueryModal, ImGuiWindowFlags_NoResize))
+    ImGui::SetNextWindowSize(ImVec2(920.0f, 620.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(640.0f, 420.0f), ImVec2(1920.0f, 1080.0f));
+
+    if (ImGui::BeginPopupModal(inspectModalTitle.c_str(), &m_showInspectQueryModal, ImGuiWindowFlags_None))
     {
         if (m_inspectingQueryIndex >= 0 && m_inspectingQueryIndex < static_cast<int>(m_savedQueries.size()))
         {
             const auto &sq = m_savedQueries[m_inspectingQueryIndex];
 
-            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_FILE_TEXT, sq.name.c_str());
+            ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s : %s", ICON_LC_FILE_TEXT, tr("explorer.query_prefix"), sq.name.c_str());
             if (!sq.description.empty())
+            {
                 ImGui::TextDisabled("%s", sq.description.c_str());
-
+            }
             ImGui::Separator();
             ImGui::Spacing();
 
-            // Tableau du schéma de sortie (colonnes disponibles en CTE)
-            ImGui::Text("Structure de sortie (%d colonne(s)) :", static_cast<int>(sq.outputSchema.size()));
-            ImGui::BeginChild("InspectQuerySchemaZone", ImVec2(-1.0f, 140.0f), true);
+            float bodyHeight = ImGui::GetContentRegionAvail().y - 45.0f;
+            if (bodyHeight < 200.0f)
+                bodyHeight = 200.0f;
+
+            // Panneau gauche (58%) : Requête SQL générée, formatée et colorée
+            float leftWidth = ImGui::GetContentRegionAvail().x * 0.58f;
+            ImGui::BeginChild("InspectSqlPane", ImVec2(leftWidth, bodyHeight), true);
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s", tr("inspect_query.sql_section"));
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            std::string formattedSql = dizui::sql::formatRawSqlQuery(sq.sql);
+
+            // Rend le texte brut transparent tout en conservant la sélection et le défilement natifs
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+            ImGui::InputTextMultiline("##InspectQuerySqlText", formattedSql.data(), formattedSql.size() + 1,
+                                      ImVec2(-1.0f, -1.0f), ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopStyleColor();
+
+            ImVec2 editorMin = ImGui::GetItemRectMin();
+            ImVec2 editorMax = ImGui::GetItemRectMax();
+            ImVec2 framePad = ImGui::GetStyle().FramePadding;
+
+            float scrollX = 0.0f;
+            float scrollY = 0.0f;
+            if (ImGuiWindow *childWin = ImGui::FindWindowByName((std::string(ImGui::GetCurrentWindow()->Name) + "/##InspectQuerySqlText").c_str()))
+            {
+                scrollX = childWin->Scroll.x;
+                scrollY = childWin->Scroll.y;
+            }
+
+            ImDrawList *drawList = ImGui::GetWindowDrawList();
+            drawList->PushClipRect(editorMin, editorMax, true);
+
+            ImVec2 textOrigin(editorMin.x + framePad.x - scrollX, editorMin.y + framePad.y - scrollY);
+            dizui::sql::renderSqlSyntaxHighlightOverlay(
+                drawList,
+                textOrigin,
+                formattedSql.c_str(),
+                ImGui::GetFont(),
+                ImGui::GetFontSize());
+
+            drawList->PopClipRect();
+
+            ImGui::EndChild();
+
+            ImGui::SameLine();
+
+            // Panneau droit (42%) : Schéma de sortie déduit
+            ImGui::BeginChild("InspectSchemaPane", ImVec2(0.0f, bodyHeight), true);
+            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f), "%s (%d)",
+                               tr("inspect_query.schema_section"), static_cast<int>(sq.outputSchema.size()));
+            ImGui::Separator();
+            ImGui::Spacing();
+
             if (sq.outputSchema.empty())
             {
-                ImGui::TextDisabled("Aucune métadonnée de colonne enregistrée.");
+                ImGui::TextDisabled("%s", tr("inspect_query.empty_schema"));
             }
-            else if (ImGui::BeginTable("InspectQuerySchemaTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+            else if (ImGui::BeginTable("InspectQuerySchemaTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
             {
-                ImGui::TableSetupColumn("Colonne");
-                ImGui::TableSetupColumn("Type PostgreSQL");
+                ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 32.0f);
+                ImGui::TableSetupColumn(tr("reverse.col_name"), ImGuiTableColumnFlags_WidthStretch, 0.55f);
+                ImGui::TableSetupColumn(tr("reverse.col_type"), ImGuiTableColumnFlags_WidthStretch, 0.45f);
                 ImGui::TableHeadersRow();
-                for (const auto &col : sq.outputSchema)
+
+                for (size_t i = 0; i < sq.outputSchema.size(); ++i)
                 {
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
-                    ImGui::TextUnformatted(col.name.c_str());
+                    ImGui::TextDisabled("%d", static_cast<int>(i + 1));
                     ImGui::TableSetColumnIndex(1);
-                    ImGui::TextColored(ImVec4(0.4f, 0.75f, 0.4f, 0.85f), "%s", col.dataType.c_str());
+                    ImGui::TextUnformatted(sq.outputSchema[i].name.c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextColored(ImVec4(0.45f, 0.80f, 0.50f, 1.0f), "%s", sq.outputSchema[i].dataType.c_str());
                 }
                 ImGui::EndTable();
             }
             ImGui::EndChild();
 
             ImGui::Spacing();
-            ImGui::Text("Requête SQL générée :");
-            std::string sqlBuf = sq.sql;
-            ImGui::InputTextMultiline("##InspectQuerySqlText", sqlBuf.data(), sqlBuf.size() + 1,
-                                      ImVec2(-1.0f, 150.0f), ImGuiInputTextFlags_ReadOnly);
-
+            ImGui::Separator();
             ImGui::Spacing();
-            if (ImGui::Button((std::string(ICON_LC_COPY) + "  Copier le SQL").c_str(), ImVec2(140.0f, 0.0f)))
-            {
-                ImGui::SetClipboardText(sq.sql.c_str());
-            }
-            ImGui::SameLine();
-        }
 
-        if (ImGui::Button("Fermer", ImVec2(110.0f, 0.0f)))
-        {
-            m_showInspectQueryModal = false;
-            m_inspectingQueryIndex = -1;
-            ImGui::CloseCurrentPopup();
+            // Boutons d'action en bas
+            std::string copyBtnLabel = std::string(ICON_LC_COPY) + "  " + tr("ai.btn_copy_sql") + "###InspectCopySqlBtn";
+            if (ImGui::Button(copyBtnLabel.c_str(), ImVec2(210.0f, 0.0f)))
+            {
+                snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", sq.sql.c_str());
+                addConsoleLog(tr("cte_stack.log_sql_copied"), LogLevel::Info);
+            }
+
+            ImGui::SameLine();
+            float availX = ImGui::GetContentRegionAvail().x;
+            if (availX > 120.0f)
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + availX - 120.0f);
+
+            if (ImGui::Button(tr("btn.close"), ImVec2(120.0f, 0.0f)))
+            {
+                m_showInspectQueryModal = false;
+                m_inspectingQueryIndex = -1;
+                ImGui::CloseCurrentPopup();
+            }
         }
         ImGui::EndPopup();
     }
 
     // =========================================================================
-    // 2. MODALE DE CONFIRMATION DE SUPPRESSION
+    // MODALE : CONFIRMATION DE SUPPRESSION D'UNE REQUÊTE
     // =========================================================================
+    std::string delQueryTitle = std::string(tr("delete_query.modal_title")) + "###DeleteQueryModal";
     if (m_showDeleteQueryModal)
-        ImGui::OpenPopup("Supprimer la Requête");
+        ImGui::OpenPopup(delQueryTitle.c_str());
 
-    ImGui::SetNextWindowSize(ImVec2(430.0f, 155.0f), ImGuiCond_Appearing);
-    if (ImGui::BeginPopupModal("Supprimer la Requête", &m_showDeleteQueryModal, ImGuiWindowFlags_NoResize))
+    ImGui::SetNextWindowSize(ImVec2(440.0f, 160.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal(delQueryTitle.c_str(), &m_showDeleteQueryModal, ImGuiWindowFlags_NoResize))
     {
         if (m_deletingQueryIndex >= 0 && m_deletingQueryIndex < static_cast<int>(m_savedQueries.size()))
         {
-            const std::string &qName = m_savedQueries[m_deletingQueryIndex].name;
-            ImGui::TextWrapped("Voulez-vous vraiment supprimer la requête '%s' du projet ?", qName.c_str());
-            ImGui::Spacing();
-
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.22f, 0.22f, 1.0f));
-            if (ImGui::Button("Supprimer", ImVec2(120.0f, 0.0f)))
-            {
-                m_savedQueries.erase(m_savedQueries.begin() + m_deletingQueryIndex);
-                m_deletingQueryIndex = -1;
-                m_showDeleteQueryModal = false;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::PopStyleColor();
-
-            ImGui::SameLine();
+            ImGui::TextWrapped("%s '%s' ?", tr("delete_query.confirm_msg"), m_savedQueries[m_deletingQueryIndex].name.c_str());
         }
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
 
-        if (ImGui::Button("Annuler", ImVec2(110.0f, 0.0f)))
+        float availX = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(availX - 220.0f);
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
         {
-            m_deletingQueryIndex = -1;
             m_showDeleteQueryModal = false;
+            m_deletingQueryIndex = -1;
             ImGui::CloseCurrentPopup();
         }
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.25f, 0.25f, 1.0f));
+        if (ImGui::Button(tr("explorer.ctx_delete"), ImVec2(110.0f, 0.0f)))
+        {
+            if (m_deletingQueryIndex >= 0 && m_deletingQueryIndex < static_cast<int>(m_savedQueries.size()))
+            {
+                m_savedQueries.erase(m_savedQueries.begin() + m_deletingQueryIndex);
+            }
+            m_showDeleteQueryModal = false;
+            m_deletingQueryIndex = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor();
         ImGui::EndPopup();
     }
 }
-
-
