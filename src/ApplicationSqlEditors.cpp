@@ -1,4 +1,5 @@
 #include "Application.hpp"
+#include <Localization.hpp>
 #include "IconsLucide.hpp"
 #include "SqlEditorHelpers.hpp"
 #include <imgui_internal.h>
@@ -18,7 +19,8 @@ void Application::renderQueryTextEditor()
         ImGui::BeginDisabled();
 
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.58f, 0.30f, 0.90f));
-    if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Exécuter SQL (Ctrl+Entrée)").c_str(), ImVec2(220.0f, 28.0f)))
+    std::string runSqlBtnLabel = std::string(ICON_LC_PLAY) + "  " + tr("sql_editor.btn_run") + "###RunRawSqlBtn";
+    if (ImGui::Button(runSqlBtnLabel.c_str(), ImVec2(220.0f, 28.0f)))
     {
         executeRawSqlQuery(std::string(m_rawSqlEditorBuf.data()));
     }
@@ -28,7 +30,8 @@ void Application::renderQueryTextEditor()
         ImGui::EndDisabled();
 
     ImGui::SameLine();
-    if (ImGui::Button((std::string(ICON_LC_TRASH) + "  Effacer").c_str(), ImVec2(100.0f, 28.0f)))
+    std::string clearSqlBtnLabel = std::string(ICON_LC_TRASH) + "  " + tr("sql_editor.btn_clear") + "###ClearRawSqlBtn";
+    if (ImGui::Button(clearSqlBtnLabel.c_str(), ImVec2(100.0f, 28.0f)))
     {
         m_rawSqlEditorBuf.fill('\0');
         m_showSqlAutocomplete = false;
@@ -37,7 +40,8 @@ void Application::renderQueryTextEditor()
     ImGui::SameLine();
     if (!hasSql)
         ImGui::BeginDisabled();
-    if (ImGui::Button((std::string(ICON_LC_ALIGN_LEFT) + "  Formater").c_str(), ImVec2(115.0f, 28.0f)))
+    std::string formatSqlBtnLabel = std::string(ICON_LC_ALIGN_LEFT) + "  " + tr("sql_editor.btn_format") + "###FormatRawSqlBtn";
+    if (ImGui::Button(formatSqlBtnLabel.c_str(), ImVec2(115.0f, 28.0f)))
     {
         std::string formatted = dizui::sql::formatRawSqlQuery(std::string(m_rawSqlEditorBuf.data()));
         snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", formatted.c_str());
@@ -46,16 +50,19 @@ void Application::renderQueryTextEditor()
         ImGui::EndDisabled();
 
     ImGui::SameLine();
-    if (ImGui::Button((std::string(ICON_LC_COPY) + "  Copier depuis le Designer").c_str(), ImVec2(215.0f, 28.0f)))
+    std::string copyDesignerBtnLabel = std::string(ICON_LC_COPY) + "  " + tr("sql_editor.btn_copy_designer") + "###CopyFromDesignerBtn";
+    if (ImGui::Button(copyDesignerBtnLabel.c_str(), ImVec2(215.0f, 28.0f)))
     {
         std::string compiled = compileVisualGraphToSelectQuery().toSQL();
         snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", compiled.c_str());
     }
 
     ImGui::SameLine();
-    ImGui::TextDisabled("  |  Cible : %s [%s]  |  Autocomplétion : Ctrl+Espace",
-                        m_selectedGateway.empty() ? "Aucune" : m_selectedGateway.c_str(),
-                        m_selectedContext.empty() ? "Aucun" : m_selectedContext.c_str());
+    ImGui::TextDisabled("  |  %s : %s [%s]  |  %s",
+                        tr("sql_editor.target_label"),
+                        m_selectedGateway.empty() ? tr("sql_editor.none_fem") : m_selectedGateway.c_str(),
+                        m_selectedContext.empty() ? tr("status.none") : m_selectedContext.c_str(),
+                        tr("sql_editor.autocomplete_hint"));
 
     ImGui::Separator();
     ImGui::Spacing();
@@ -141,7 +148,6 @@ void Application::renderQueryTextEditor()
         true);
     dizui::sql::renderSqlSyntaxHighlightOverlay(drawList, textStartPos, m_rawSqlEditorBuf.data(), ImGui::GetFont(), ImGui::GetFontSize());
     drawList->PopClipRect();
-
 
     // =========================================================================
     // LOGIQUE D'ANALYSE CONTEXTUELLE ET POPUP D'AUTOCOMPLÉTION
@@ -289,7 +295,7 @@ void Application::renderQueryTextEditor()
                 {
                     if (lowPrefix.empty() || toLower(sq.name).find(lowPrefix) != std::string::npos)
                     {
-                        candidates.push_back({sq.name, "CTE / Requête", true});
+                        candidates.push_back({sq.name, tr("sql_editor.autocomplete_cte_detail"), true});
                     }
                 }
             }
@@ -381,7 +387,7 @@ void Application::executeRawSqlQuery(const std::string &sqlText)
 
     if (!m_activeProject || !m_activeProject->logicalConnections().contains(m_selectedGateway))
     {
-        m_executionError = "Aucune passerelle logique sélectionnée.";
+        m_executionError = tr("sql_exec.no_gateway");
         m_showQueryResultsPanel = true;
         m_focusQueryResultsTab = true;
         return;
@@ -390,7 +396,7 @@ void Application::executeRawSqlQuery(const std::string &sqlText)
     const auto &gw = m_activeProject->logicalConnections().at(m_selectedGateway);
     if (!gw.environments().contains(m_selectedContext))
     {
-        m_executionError = "Environnement cible introuvable dans la passerelle.";
+        m_executionError = tr("sql_exec.env_not_found");
         m_showQueryResultsPanel = true;
         m_focusQueryResultsTab = true;
         return;
@@ -401,14 +407,14 @@ void Application::executeRawSqlQuery(const std::string &sqlText)
     auto connRes = conn.connect();
     if (!connRes.has_value())
     {
-        m_executionError = "Échec de connexion PostgreSQL : " + connRes.error();
+        m_executionError = std::string(tr("sql_exec.conn_failed")) + " : " + connRes.error();
         addConsoleLog(m_executionError, LogLevel::Error);
         m_showQueryResultsPanel = true;
         m_focusQueryResultsTab = true;
         return;
     }
 
-    addConsoleLog("Exécution SQL directe : " + sqlText, LogLevel::Info);
+    addConsoleLog(std::string(tr("sql_exec.log_running")) + " : " + sqlText, LogLevel::Info);
 
     PGresult *res = PQexec(conn.get(), sqlText.c_str());
     ExecStatusType status = PQresultStatus(res);
@@ -439,19 +445,20 @@ void Application::executeRawSqlQuery(const std::string &sqlText)
             m_queryResultRows.push_back(std::move(row));
         }
 
-        addConsoleLog("Requête exécutée avec succès (" + std::to_string(nTuples) + " ligne(s)).", LogLevel::Success);
+        addConsoleLog(std::string(tr("sql_exec.log_success")) + " (" + std::to_string(nTuples) + " " + tr("results.rows_returned") + ").", LogLevel::Success);
     }
     else if (status == PGRES_COMMAND_OK)
     {
         std::string affected = PQcmdTuples(res);
-        m_queryResultHeaders = {"Statut", "Lignes affectées"};
-        m_queryResultRows = {{"OK", affected.empty() ? "0" : affected}};
-        addConsoleLog("Commande SQL exécutée avec succès (" + (affected.empty() ? "0" : affected) + " ligne(s) affectée(s)).", LogLevel::Success);
+        std::string countStr = affected.empty() ? "0" : affected;
+        m_queryResultHeaders = {tr("sql_exec.col_status"), tr("sql_exec.col_affected")};
+        m_queryResultRows = {{"OK", countStr}};
+        addConsoleLog(std::string(tr("sql_exec.log_cmd_success")) + " (" + countStr + " " + tr("sql_exec.rows_affected_suffix") + ").", LogLevel::Success);
     }
     else
     {
         m_executionError = PQerrorMessage(conn.get());
-        addConsoleLog("Erreur SQL : " + m_executionError, LogLevel::Error);
+        addConsoleLog(std::string(tr("results.sql_error")) + " : " + m_executionError, LogLevel::Error);
     }
 
     PQclear(res);
@@ -523,7 +530,8 @@ void Application::renderCteStackEditor()
         ImGui::BeginDisabled();
 
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.58f, 0.30f, 0.90f));
-    if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Exécuter le Pipeline Complet").c_str(), ImVec2(230.0f, 28.0f)))
+    std::string runPipelineBtnLabel = std::string(ICON_LC_PLAY) + "  " + tr("cte_stack.btn_run_pipeline") + "###RunCtePipelineBtn";
+    if (ImGui::Button(runPipelineBtnLabel.c_str(), ImVec2(230.0f, 28.0f)))
     {
         std::string fullSql = compileVisualGraphToSelectQuery().toSQL();
         executeRawSqlQuery(fullSql);
@@ -536,26 +544,27 @@ void Application::renderCteStackEditor()
     ImGui::SameLine();
     if (!hasNodes)
         ImGui::BeginDisabled();
-    if (ImGui::Button((std::string(ICON_LC_FILE_TEXT) + "  Voir le SQL Compilé").c_str(), ImVec2(185.0f, 28.0f)))
+    std::string viewSqlBtnLabel = std::string(ICON_LC_FILE_TEXT) + "  " + tr("cte_stack.btn_view_sql") + "###ViewCteSqlBtn";
+    if (ImGui::Button(viewSqlBtnLabel.c_str(), ImVec2(185.0f, 28.0f)))
     {
         std::string fullSql = compileVisualGraphToSelectQuery().toSQL();
         snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", fullSql.c_str());
-        addConsoleLog("SQL compilé copié dans l'éditeur de texte.", LogLevel::Info);
+        addConsoleLog(tr("cte_stack.log_sql_copied"), LogLevel::Info);
     }
     if (!hasNodes)
         ImGui::EndDisabled();
 
-    // Sélecteur d'orientation : Horizontal (Gauche -> Droite) / Vertical (Haut -> Bas)
     // Sélecteur d'orientation : Horizontal / Vertical
     ImGui::SameLine();
-    ImGui::TextDisabled("  |  Disposition :");
+    ImGui::TextDisabled("  |  %s :", tr("cte_stack.layout_label"));
     ImGui::SameLine();
 
     bool wasHoriz = m_cteStackHorizontal;
 
     if (wasHoriz)
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.52f, 0.85f, 0.90f));
-    if (ImGui::Button("Horizontale", ImVec2(105.0f, 28.0f)))
+    std::string horizBtnLabel = std::string(tr("cte_stack.layout_horizontal")) + "###CteLayoutHorizBtn";
+    if (ImGui::Button(horizBtnLabel.c_str(), ImVec2(105.0f, 28.0f)))
         m_cteStackHorizontal = true;
     if (wasHoriz)
         ImGui::PopStyleColor();
@@ -564,7 +573,8 @@ void Application::renderCteStackEditor()
 
     if (!wasHoriz)
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.52f, 0.85f, 0.90f));
-    if (ImGui::Button("Verticale", ImVec2(95.0f, 28.0f)))
+    std::string vertBtnLabel = std::string(tr("cte_stack.layout_vertical")) + "###CteLayoutVertBtn";
+    if (ImGui::Button(vertBtnLabel.c_str(), ImVec2(95.0f, 28.0f)))
         m_cteStackHorizontal = false;
     if (!wasHoriz)
         ImGui::PopStyleColor();
@@ -617,8 +627,8 @@ void Application::renderCteStackEditor()
     if (m_visualQueryNodes.empty())
     {
         ImGui::Spacing();
-        ImGui::TextDisabled("   Aucune CTE ou table dans le pipeline.");
-        ImGui::TextDisabled("   Glissez-déposez des requêtes enregistrées ou des tables ici (ou depuis le Query Visual Designer).");
+        ImGui::TextDisabled("   %s", tr("cte_stack.empty_title"));
+        ImGui::TextDisabled("   %s", tr("cte_stack.empty_hint"));
         ImGui::EndChild();
         return;
     }
@@ -737,7 +747,7 @@ void Application::renderCteStackEditor()
             {
                 m_pendingCtePreviewName = step.queryName;
             }
-            ImGui::SetItemTooltip("Aperçu graphique de '%s'", step.queryName.c_str());
+            ImGui::SetItemTooltip("%s '%s'", tr("cte_stack.preview_tooltip"), step.queryName.c_str());
             ImGui::PopID();
 
             ImGui::SameLine();
@@ -749,13 +759,13 @@ void Application::renderCteStackEditor()
             {
                 executeRawSqlQuery(cteRef->sql);
             }
-            ImGui::SetItemTooltip("Exécuter '%s' seule", step.queryName.c_str());
+            ImGui::SetItemTooltip("%s '%s'", tr("cte_stack.run_single_tooltip"), step.queryName.c_str());
             ImGui::PopID();
             if (!hasConnection)
                 ImGui::EndDisabled();
         }
 
-        ImGui::TextDisabled("Alias : %s", step.alias.c_str());
+        ImGui::TextDisabled("%s : %s", tr("node.alias_label"), step.alias.c_str());
         ImGui::Separator();
 
         // --- Liste des colonnes ---
@@ -798,14 +808,14 @@ void Application::renderCteStackEditor()
                     ImGui::SameLine();
                     ImGui::TextUnformatted(col.name.c_str());
                     if (ImGui::IsItemHovered())
-                        ImGui::SetItemTooltip("Type : %s", col.dataType.c_str());
+                        ImGui::SetItemTooltip("%s : %s", tr("reverse.col_type"), col.dataType.c_str());
                     ImGui::PopID();
                 }
                 else
                 {
                     ImGui::TextDisabled(" - %s", col.name.c_str());
                     if (ImGui::IsItemHovered())
-                        ImGui::SetItemTooltip("Type : %s", col.dataType.c_str());
+                        ImGui::SetItemTooltip("%s : %s", tr("reverse.col_type"), col.dataType.c_str());
                 }
             }
         }
@@ -880,12 +890,12 @@ void Application::renderCteStackEditor()
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.8f);
     ImGui::BeginChild("FinalProjectionCard", ImVec2(projWidth, projHeight), true);
-    ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s  PROJECTION (%d)",
-                       ICON_LC_LAYERS, int(m_projectionItems.size()));
+    ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s  %s (%d)",
+                       ICON_LC_LAYERS, tr("cte_stack.final_proj_header"), int(m_projectionItems.size()));
     ImGui::Separator();
     if (m_projectionItems.empty())
     {
-        ImGui::TextDisabled("Cochez des colonnes pour C1, C2...");
+        ImGui::TextDisabled("%s", tr("cte_stack.final_proj_empty"));
     }
     else
     {
@@ -954,5 +964,3 @@ void Application::renderCteStackEditor()
         openCtePreviewModal(target);
     }
 }
-
-

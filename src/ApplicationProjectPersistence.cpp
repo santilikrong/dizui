@@ -1,4 +1,5 @@
 #include "Application.hpp"
+#include "Localization.hpp"
 #include <GLFW/glfw3.h>
 #include <imgui_node_editor.h>
 #include <nlohmann/json.hpp>
@@ -7,8 +8,6 @@
 #include <algorithm>
 
 namespace ed = ax::NodeEditor;
-
-
 
 nlohmann::json Application::serializeFullProjectToJSON()
 {
@@ -77,7 +76,6 @@ nlohmann::json Application::serializeFullProjectToJSON()
     return rootJson;
 }
 
-
 bool Application::saveProjectToFile(const std::string &filePath)
 {
     if (filePath.empty())
@@ -127,7 +125,6 @@ bool Application::saveProjectToFile(const std::string &filePath)
     }
 }
 
-
 bool Application::loadProjectFromFile(const std::string &filePath)
 {
     if (filePath.empty())
@@ -138,7 +135,9 @@ bool Application::loadProjectFromFile(const std::string &filePath)
         std::ifstream inFile(filePath);
         if (!inFile.is_open())
         {
-            std::cerr << "[dizui Erreur] Impossible d'ouvrir le fichier : " << filePath << std::endl;
+            std::string errMsg = std::string(tr("project.load_open_error")) + " : " + filePath;
+            std::cerr << "[dizui] " << errMsg << std::endl;
+            addConsoleLog(errMsg, LogLevel::Error);
             return false;
         }
 
@@ -150,11 +149,13 @@ bool Application::loadProjectFromFile(const std::string &filePath)
         auto projRes = cppsqlx::DataIntegrationProject::fromJSON(rootJson);
         if (!projRes.has_value())
         {
-            std::cerr << "[dizui Erreur] JSON projet invalide : " << projRes.error() << std::endl;
+            std::string errMsg = std::string(tr("project.load_invalid_json")) + " : " + projRes.error();
+            std::cerr << "[dizui] " << errMsg << std::endl;
+            addConsoleLog(errMsg, LogLevel::Error);
             return false;
         }
 
-        // Instanciation unique (le doublon qui vidait l'objet a été supprimé)
+        // Instanciation unique
         m_activeProject = std::make_unique<cppsqlx::DataIntegrationProject>(std::move(projRes.value()));
         m_activeProject->setPath(filePath);
         m_activeProject->resolveDependencies();
@@ -171,7 +172,7 @@ bool Application::loadProjectFromFile(const std::string &filePath)
         m_currentProjectFilePath = filePath;
         m_currentProjectName = m_activeProject->name();
 
-        // 2. Nettoyage des canevas actifs
+        // 2. Nettoyage des canevas actifs et réinitialisation des sélecteurs de connexion
         m_visualQueryNodes.clear();
         m_visualQueryLinks.clear();
         m_visualQueryPredicates.clear();
@@ -182,6 +183,9 @@ bool Application::loadProjectFromFile(const std::string &filePath)
         m_savedQueries.clear();
         m_savedTasks.clear();
         m_savedWorkflows.clear();
+
+        m_selectedGateway.clear();
+        m_selectedContext.clear();
 
         // 3. Repeuplement des tâches depuis m_activeProject
         for (const auto &[tName, taskObj] : m_activeProject->tasks())
@@ -279,19 +283,19 @@ bool Application::loadProjectFromFile(const std::string &filePath)
             glfwSetWindowTitle(currentWin, windowTitle.c_str());
         }
 
-        std::cout << "[dizui Info] Projet chargé (" << m_activeProject->datasets().size()
-                  << " datasets, " << m_savedQueries.size() << " requêtes, "
-                  << m_savedTasks.size() << " tâches, " << m_savedWorkflows.size()
-                  << " workflows restaurés) : " << filePath << std::endl;
+        std::string okMsg = std::string(tr("project.load_success")) + " : " + m_currentProjectName;
+        std::cout << "[dizui Info] " << okMsg << std::endl;
+        addConsoleLog(okMsg, LogLevel::Success);
         return true;
     }
     catch (const std::exception &e)
     {
-        std::cerr << "[dizui Erreur] Échec du chargement : " << e.what() << std::endl;
+        std::string errMsg = std::string(tr("project.load_exception")) + " : " + e.what();
+        std::cerr << "[dizui] " << errMsg << std::endl;
+        addConsoleLog(errMsg, LogLevel::Error);
         return false;
     }
 }
-
 
 void Application::createNewProject(const std::string &projectName)
 {
@@ -342,6 +346,3 @@ void Application::createNewProject(const std::string &projectName)
         glfwSetWindowTitle(currentWin, windowTitle.c_str());
     }
 }
-
-
-

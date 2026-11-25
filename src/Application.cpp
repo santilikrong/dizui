@@ -1,4 +1,5 @@
 #include "Application.hpp"
+#include <Localization.hpp>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <GLFW/glfw3.h>
@@ -107,9 +108,10 @@ namespace
 
 Application::Application()
 {
-
     auto rootLogger = log4cxx::Logger::getRootLogger();
     rootLogger->addAppender(std::make_shared<DizuiConsoleAppender>(this));
+
+    Localization::instance().loadLanguage(AppLanguage::FR);
 
     g_coutRedirector = std::make_unique<GuiStreamRedirector>(std::cout, [this](const std::string &line)
                                                              {
@@ -199,7 +201,6 @@ void Application::run()
     }
 }
 
-
 void Application::renderUI()
 {
 
@@ -257,13 +258,14 @@ void Application::renderUI()
         // Découpe 25% de la hauteur en bas de l'espace de travail pour la console et les résultats SQL
         ImGuiID dock_bottom_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Down, 0.25f, nullptr, &dock_main_id);
 
+        // Dans if (init_layout && !ImGui::DockBuilderGetNode(dockspace_id)) :
         ImGui::DockBuilderDockWindow("Outils", dock_left_id);
         ImGui::DockBuilderDockWindow("Panneau de Contrôle", dock_center_id);
-        ImGui::DockBuilderDockWindow("Espace de Travail (Canevas)", dock_main_id);
+        ImGui::DockBuilderDockWindow("Espace de Travail###MainWorkspacePanel", dock_main_id);
 
-        // Regroupement des deux panneaux sous forme d'onglets dans le dock du bas
-        ImGui::DockBuilderDockWindow("Console & Journaux d'Exécution", dock_bottom_id);
-        ImGui::DockBuilderDockWindow("Résultat du Graphe Visuel", dock_bottom_id);
+        ImGui::DockBuilderDockWindow("Console & Journaux d'Exécution###ConsoleBottomPanel", dock_bottom_id);
+        ImGui::DockBuilderDockWindow("Résultat du Graphe Visuel###ResultsBottomPanel", dock_bottom_id);
+        ImGui::DockBuilderDockWindow("Assistant IA (Ollama)###AiAssistantBottomPanel", dock_bottom_id);
 
         ImGui::DockBuilderFinish(dockspace_id);
     }
@@ -278,16 +280,15 @@ void Application::renderUI()
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s", ICON_LC_CPU);
         ImGui::Spacing();
-        if (ImGui::BeginMenu("File"))
+        if (ImGui::BeginMenu(tr("menu.file")))
         {
-
-            if (ImGui::MenuItem((std::string(ICON_LC_FILE_PLUS) + "  Nouveau projet").c_str(), "Ctrl+N"))
+            if (ImGui::MenuItem((std::string(ICON_LC_FILE_PLUS) + "  " + tr("menu.new_project")).c_str(), "Ctrl+N"))
             {
-                createNewProject("Nouveau_Projet");
+                createNewProject(tr("project.default_name"));
             }
             ImGui::Separator();
 
-            if (ImGui::MenuItem("Ouvrir...", "Ctrl+O"))
+            if (ImGui::MenuItem((std::string(ICON_LC_FOLDER_OPEN) + "  " + tr("menu.open")).c_str(), "Ctrl+O"))
             {
                 if (!m_currentProjectFilePath.empty())
                 {
@@ -303,7 +304,7 @@ void Application::renderUI()
 
             ImGui::Separator();
             // ENREGISTRER : Sauvegarde directe si un chemin existe déjà, sinon bascule sur "Enregistrer sous"
-            if (ImGui::MenuItem("Enregistrer", "Ctrl+S"))
+            if (ImGui::MenuItem((std::string(ICON_LC_SAVE) + "  " + tr("menu.save")).c_str(), "Ctrl+S"))
             {
                 if (!m_currentProjectFilePath.empty())
                 {
@@ -316,7 +317,7 @@ void Application::renderUI()
             }
 
             // ENREGISTRER SOUS : Ouvre systématiquement la modale de choix de fichier
-            if (ImGui::MenuItem("Enregistrer sous...", "Ctrl+Shift+S"))
+            if (ImGui::MenuItem((std::string(ICON_LC_SAVE) + "  " + tr("menu.save_as")).c_str(), "Ctrl+Shift+S"))
             {
                 if (!m_currentProjectFilePath.empty())
                 {
@@ -334,11 +335,24 @@ void Application::renderUI()
 
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("Edit"))
+        if (ImGui::BeginMenu(tr("menu.edit")))
             ImGui::EndMenu();
-        if (ImGui::BeginMenu("View"))
+        if (ImGui::BeginMenu(tr("menu.view")))
             ImGui::EndMenu();
-        if (ImGui::BeginMenu("Help"))
+
+        if (ImGui::BeginMenu(tr("menu.language")))
+        {
+            bool isFr = (Localization::instance().currentLanguage() == AppLanguage::FR);
+            if (ImGui::MenuItem("Français", nullptr, isFr))
+                Localization::instance().loadLanguage(AppLanguage::FR);
+
+            if (ImGui::MenuItem("English", nullptr, !isFr))
+                Localization::instance().loadLanguage(AppLanguage::EN);
+
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu(tr("menu.help")))
             ImGui::EndMenu();
 
         if (m_activeProject)
@@ -351,25 +365,31 @@ void Application::renderUI()
             ImFont *small_font_ptr = (io.Fonts->Fonts.Size > 1) ? io.Fonts->Fonts[0] : nullptr;
 
             ImGui::SameLine();
-            ImGui::TextDisabled("Connexion :");
+            ImGui::TextDisabled("%s", tr("toolbar.connection"));
             ImGui::SameLine();
             ImGui::Dummy(ImVec2(4.0f, 0.0f));
             ImGui::SameLine();
             ImGui::SetNextItemWidth(250.0f);
 
-            if (m_selectedGateway.empty() && !m_activeProject->logicalConnections().empty())
-                m_selectedGateway = m_activeProject->logicalConnections().begin()->first;
+            // Réinitialise automatiquement la passerelle si elle est vide ou absente du projet actif
+            const auto &logConns = m_activeProject->logicalConnections();
+            if (!logConns.empty() && (m_selectedGateway.empty() || !logConns.contains(m_selectedGateway)))
+            {
+                m_selectedGateway = logConns.begin()->first;
+                m_selectedContext.clear();
+            }
 
             if (small_font_ptr)
                 ImGui::PushFont(small_font_ptr);
-            if (ImGui::BeginCombo("##GatewayCombo", m_selectedGateway.empty() ? "Connexion..." : m_selectedGateway.c_str()))
+            const char *gatewayPreview = m_selectedGateway.empty() ? tr("toolbar.connection_placeholder") : m_selectedGateway.c_str();
+            if (ImGui::BeginCombo("##GatewayCombo", gatewayPreview))
             {
-                for (const auto &[name, logConn] : m_activeProject->logicalConnections())
+                for (const auto &[name, logConn] : logConns)
                 {
                     if (ImGui::Selectable(name.c_str(), m_selectedGateway == name))
                     {
                         m_selectedGateway = name;
-                        m_selectedContext = "";
+                        m_selectedContext.clear();
                     }
                 }
                 ImGui::EndCombo();
@@ -380,25 +400,31 @@ void Application::renderUI()
             ImGui::SameLine();
             ImGui::Dummy(ImVec2(15.0f, 0.0f));
             ImGui::SameLine();
-            ImGui::TextDisabled("Contexte :");
+            ImGui::TextDisabled("%s", tr("toolbar.context"));
             ImGui::SameLine();
             ImGui::Dummy(ImVec2(4.0f, 0.0f));
             ImGui::SameLine();
             ImGui::SetNextItemWidth(120.0f);
 
             std::vector<std::string> available_contexts;
-            if (m_activeProject->logicalConnections().contains(m_selectedGateway))
+            if (logConns.contains(m_selectedGateway))
             {
-                const auto &currentGateway = m_activeProject->logicalConnections().at(m_selectedGateway);
+                const auto &currentGateway = logConns.at(m_selectedGateway);
                 for (const auto &[envName, physConn] : currentGateway.environments())
                     available_contexts.push_back(envName);
-                if (m_selectedContext.empty() && !available_contexts.empty())
+
+                // Sélectionne le premier contexte disponible si m_selectedContext est vide ou invalide
+                if (!available_contexts.empty() &&
+                    std::find(available_contexts.begin(), available_contexts.end(), m_selectedContext) == available_contexts.end())
+                {
                     m_selectedContext = available_contexts.front();
+                }
             }
 
             if (small_font_ptr)
                 ImGui::PushFont(small_font_ptr);
-            if (ImGui::BeginCombo("##ContextCombo", m_selectedContext.empty() ? "Contexte..." : m_selectedContext.c_str()))
+            const char *contextPreview = m_selectedContext.empty() ? tr("toolbar.context_placeholder") : m_selectedContext.c_str();
+            if (ImGui::BeginCombo("##ContextCombo", contextPreview))
             {
                 for (const auto &envName : available_contexts)
                 {
@@ -423,6 +449,7 @@ void Application::renderUI()
     renderMainContentZone();
     renderConsolePanel();
     renderQueryResultsPanel();
+    renderAiAssistantPanel();
     renderGlobalModals();
 }
 
@@ -562,15 +589,15 @@ void Application::renderActivityBar()
         ImGui::PopStyleColor();
     };
 
-    drawToolbarButtonLocal(ICON_LC_BLOCKS, "Project workspace", ActiveTab::Project);
+    drawToolbarButtonLocal(ICON_LC_BLOCKS, tr("activity.project"), ActiveTab::Project);
     ImGui::Spacing();
-    drawToolbarButtonLocal(ICON_LC_SEARCH, "Rechercher dans le Graphe", ActiveTab::Search);
+    drawToolbarButtonLocal(ICON_LC_SEARCH, tr("activity.search"), ActiveTab::Search);
     ImGui::Spacing();
-    drawToolbarButtonLocal(ICON_LC_GIT_BRANCH, "Gérer les sources", ActiveTab::Git);
+    drawToolbarButtonLocal(ICON_LC_GIT_BRANCH, tr("activity.git"), ActiveTab::Git);
     ImGui::Spacing();
-    drawToolbarButtonLocal(ICON_LC_BOX, "Gestion package", ActiveTab::Package);
+    drawToolbarButtonLocal(ICON_LC_BOX, tr("activity.package"), ActiveTab::Package);
     ImGui::Spacing();
-    drawToolbarButtonLocal(ICON_LC_SETTINGS, "Paramètres de l'application", ActiveTab::Settings);
+    drawToolbarButtonLocal(ICON_LC_SETTINGS, tr("activity.settings"), ActiveTab::Settings);
     ImGui::PopStyleColor(2);
     ImGui::End();
 }
@@ -578,7 +605,8 @@ void Application::renderActivityBar()
 void Application::renderMainContentZone()
 {
     ImGuiWindowFlags workspace_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove;
-    ImGui::Begin("Espace de Travail (Canevas)", nullptr, workspace_flags);
+    std::string workspaceTitle = std::string(tr("panel.workspace")) + "###MainWorkspacePanel";
+    ImGui::Begin(workspaceTitle.c_str(), nullptr, workspace_flags);
 
     ImGuiWindow *current_win = ImGui::GetCurrentWindow();
     if (current_win && current_win->DockNode)
@@ -588,17 +616,20 @@ void Application::renderMainContentZone()
 
     if (ImGui::BeginTabBar("DesignerTabBar", ImGuiTabBarFlags_None))
     {
-        if (ImGui::BeginTabItem((std::string(ICON_LC_ACTIVITY) + "  Workflow Designer").c_str()))
+        std::string wfTab = std::string(ICON_LC_ACTIVITY) + "  " + tr("tab.workflow_designer") + "###TabWorkflow";
+        if (ImGui::BeginTabItem(wfTab.c_str()))
         {
             if (ImGui::IsItemActivated())
             {
                 m_showConsolePanel = true;
-                ImGui::SetWindowFocus("Console & Journaux d'Exécution");
+                ImGui::SetWindowFocus("###ConsoleBottomPanel");
             }
             renderWorkflowEditor();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem((std::string(ICON_LC_SEARCH) + "  Query Visual Designer").c_str()))
+
+        std::string qvTab = std::string(ICON_LC_SEARCH) + "  " + tr("tab.query_visual_designer") + "###TabQueryVisual";
+        if (ImGui::BeginTabItem(qvTab.c_str()))
         {
             isQueryVisualActive = true;
             if (ImGui::IsItemActivated())
@@ -608,7 +639,9 @@ void Application::renderMainContentZone()
             renderQueryEditor();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem((std::string(ICON_LC_BOX) + "  Query Text Editor").c_str()))
+
+        std::string qtTab = std::string(ICON_LC_BOX) + "  " + tr("tab.query_text_editor") + "###TabQueryText";
+        if (ImGui::BeginTabItem(qtTab.c_str()))
         {
             isQueryVisualActive = true;
             if (ImGui::IsItemActivated())
@@ -618,7 +651,9 @@ void Application::renderMainContentZone()
             renderQueryTextEditor();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem((std::string(ICON_LC_LAYERS) + "  Pipeline CTE").c_str()))
+
+        std::string cteTab = std::string(ICON_LC_LAYERS) + "  " + tr("tab.cte_pipeline") + "###TabCtePipeline";
+        if (ImGui::BeginTabItem(cteTab.c_str()))
         {
             isQueryVisualActive = true;
             if (ImGui::IsItemActivated())
@@ -652,13 +687,15 @@ void Application::renderGlobalModals()
 
 void Application::renderReverseEngineeringModal()
 {
+    std::string modalTitle = std::string(tr("reverse.modal_title")) + "###ReverseEngModal";
+
     if (m_showReverseModal)
-        ImGui::OpenPopup("Reverse Engineering - Catalogue PostgreSQL");
+        ImGui::OpenPopup(modalTitle.c_str());
 
     ImGui::SetNextWindowSize(ImVec2(900.0f, 550.0f), ImGuiCond_Once);
     ImGui::SetNextWindowSizeConstraints(ImVec2(650.0f, 400.0f), ImVec2(1920.0f, 1080.0f));
 
-    if (ImGui::BeginPopupModal("Reverse Engineering - Catalogue PostgreSQL", &m_showReverseModal, ImGuiWindowFlags_None))
+    if (ImGui::BeginPopupModal(modalTitle.c_str(), &m_showReverseModal, ImGuiWindowFlags_None))
     {
         static std::string last_gateway = "";
         static std::string last_env = "";
@@ -691,8 +728,8 @@ void Application::renderReverseEngineeringModal()
 
         if (!modalConn || !modalConn->isConnected())
         {
-            ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "Erreur Connexion Active.");
-            if (ImGui::Button("Fermer"))
+            ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "%s", tr("reverse.conn_error"));
+            if (ImGui::Button(tr("btn.close")))
             {
                 m_showReverseModal = false;
                 ImGui::CloseCurrentPopup();
@@ -720,7 +757,8 @@ void Application::renderReverseEngineeringModal()
                 {
                     m_reverseSelectedSchema = sch;
                     m_reverseSelectedObject = "";
-                    m_cachedTables.clear(); // Force le rechargement des tables du nouveau schéma
+                    m_reverseCheckedObjects.clear();
+                    m_cachedTables.clear();
                     m_cachedStructure.clear();
                 }
             }
@@ -737,35 +775,51 @@ void Application::renderReverseEngineeringModal()
         // Champ de filtre rapide pour les schémas volumineux
         static char tableFilterBuf[128] = "";
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputTextWithHint("##TableSearchFilter", "Filtrer les tables...", tableFilterBuf, IM_ARRAYSIZE(tableFilterBuf));
+        ImGui::InputTextWithHint("##TableSearchFilter", tr("reverse.filter_hint"), tableFilterBuf, IM_ARRAYSIZE(tableFilterBuf));
         ImGui::Spacing();
 
-        if (ImGui::TreeNodeEx("Tables", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-            // Construction de la liste filtrée (insensible à la casse)
-            std::vector<const std::string *> filteredTables;
-            filteredTables.reserve(m_cachedTables.size());
-            std::string filterStr(tableFilterBuf);
-            std::transform(filterStr.begin(), filterStr.end(), filterStr.begin(), ::tolower);
+        // Construction de la liste filtrée
+        std::vector<const std::string *> filteredTables;
+        filteredTables.reserve(m_cachedTables.size());
+        std::string filterStr(tableFilterBuf);
+        std::transform(filterStr.begin(), filterStr.end(), filterStr.begin(), ::tolower);
 
-            for (const auto &tbl : m_cachedTables)
+        for (const auto &tbl : m_cachedTables)
+        {
+            if (filterStr.empty())
             {
-                if (filterStr.empty())
+                filteredTables.push_back(&tbl);
+            }
+            else
+            {
+                std::string lowerTbl = tbl;
+                std::transform(lowerTbl.begin(), lowerTbl.end(), lowerTbl.begin(), ::tolower);
+                if (lowerTbl.find(filterStr) != std::string::npos)
                 {
                     filteredTables.push_back(&tbl);
                 }
-                else
-                {
-                    std::string lowerTbl = tbl;
-                    std::transform(lowerTbl.begin(), lowerTbl.end(), lowerTbl.begin(), ::tolower);
-                    if (lowerTbl.find(filterStr) != std::string::npos)
-                    {
-                        filteredTables.push_back(&tbl);
-                    }
-                }
             }
+        }
 
-            // Virtualisation du rendu : ne dessine que les lignes visibles à l'écran
+        // Boutons rapides Tout cocher / Tout décocher (agissent sur les tables visibles/filtrées)
+        if (ImGui::SmallButton(tr("reverse.btn_select_all")))
+        {
+            for (const std::string *tblPtr : filteredTables)
+                m_reverseCheckedObjects.insert(*tblPtr);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(tr("reverse.btn_deselect_all")))
+        {
+            for (const std::string *tblPtr : filteredTables)
+                m_reverseCheckedObjects.erase(*tblPtr);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%zu)", m_reverseCheckedObjects.size());
+        ImGui::Spacing();
+
+        std::string tablesNodeLabel = std::string(tr("reverse.tables_node")) + "###ReverseTablesNode";
+        if (ImGui::TreeNodeEx(tablesNodeLabel.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+        {
             ImGuiListClipper clipper;
             clipper.Begin(static_cast<int>(filteredTables.size()));
             while (clipper.Step())
@@ -774,6 +828,17 @@ void Application::renderReverseEngineeringModal()
                 {
                     const std::string &tbl = *filteredTables[row];
                     ImGui::PushID(row);
+
+                    bool isChecked = m_reverseCheckedObjects.contains(tbl);
+                    if (ImGui::Checkbox("##chk_tbl", &isChecked))
+                    {
+                        if (isChecked)
+                            m_reverseCheckedObjects.insert(tbl);
+                        else
+                            m_reverseCheckedObjects.erase(tbl);
+                    }
+
+                    ImGui::SameLine();
                     if (ImGui::Selectable(tbl.c_str(), m_reverseSelectedObject == tbl))
                     {
                         m_reverseSelectedObject = tbl;
@@ -796,10 +861,10 @@ void Application::renderReverseEngineeringModal()
 
         if (!m_reverseSelectedObject.empty() && ImGui::BeginTable("MetadataColumnsTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable))
         {
-            ImGui::TableSetupColumn("Nom");
-            ImGui::TableSetupColumn("Type");
-            ImGui::TableSetupColumn("Null");
-            ImGui::TableSetupColumn("PK");
+            ImGui::TableSetupColumn(tr("reverse.col_name"));
+            ImGui::TableSetupColumn(tr("reverse.col_type"));
+            ImGui::TableSetupColumn(tr("reverse.col_null"));
+            ImGui::TableSetupColumn(tr("reverse.col_pk"));
             ImGui::TableHeadersRow();
 
             for (const auto &col : m_cachedStructure)
@@ -810,7 +875,7 @@ void Application::renderReverseEngineeringModal()
                 ImGui::TableSetColumnIndex(1);
                 ImGui::Text("%s", col.dataType.c_str());
                 ImGui::TableSetColumnIndex(2);
-                ImGui::Text("%s", col.isNullable ? "Oui" : "Non");
+                ImGui::Text("%s", col.isNullable ? tr("common.yes") : tr("common.no"));
                 ImGui::TableSetColumnIndex(3);
                 ImGui::Text("%s", col.isPrimaryKey ? "[PK]" : "-");
             }
@@ -819,17 +884,48 @@ void Application::renderReverseEngineeringModal()
         ImGui::EndChild();
 
         ImGui::Separator();
-        if (ImGui::Button("Monter dans le Projet") && m_activeProject)
+
+        // Prépare la liste des tables à importer (toutes les cases cochées, ou à défaut la table sélectionnée)
+        std::vector<std::string> targetsToImport(m_reverseCheckedObjects.begin(), m_reverseCheckedObjects.end());
+        if (targetsToImport.empty() && !m_reverseSelectedObject.empty())
         {
-            auto datasetRes = cppsqlx::DatasetFactory().createFromDatabase(*modalConn, m_reverseSelectedObject, m_reverseSelectedSchema);
-            if (datasetRes)
-                m_activeProject->addDataset(std::move(datasetRes.value()));
+            targetsToImport.push_back(m_reverseSelectedObject);
+        }
+
+        bool canImport = (!targetsToImport.empty() && m_activeProject != nullptr);
+        if (!canImport)
+            ImGui::BeginDisabled();
+
+        std::string importLabel = std::string(tr("reverse.btn_import")) +
+                                  " (" + std::to_string(targetsToImport.size()) + ")###ImportReverseBtn";
+        if (ImGui::Button(importLabel.c_str()))
+        {
+            cppsqlx::DatasetFactory factory;
+            int importedCount = 0;
+
+            for (const auto &tblName : targetsToImport)
+            {
+                auto datasetRes = factory.createFromDatabase(*modalConn, tblName, m_reverseSelectedSchema);
+                if (datasetRes)
+                {
+                    m_activeProject->addDataset(std::move(datasetRes.value()));
+                    ++importedCount;
+                }
+            }
+
+            addConsoleLog(std::to_string(importedCount) + " " + tr("reverse.log_imported_count"), LogLevel::Success);
+            m_reverseCheckedObjects.clear();
             m_showReverseModal = false;
             ImGui::CloseCurrentPopup();
         }
+
+        if (!canImport)
+            ImGui::EndDisabled();
+
         ImGui::SameLine();
-        if (ImGui::Button("Annuler"))
+        if (ImGui::Button(tr("btn.cancel")))
         {
+            m_reverseCheckedObjects.clear();
             m_showReverseModal = false;
             ImGui::CloseCurrentPopup();
         }
@@ -839,19 +935,21 @@ void Application::renderReverseEngineeringModal()
 
 void Application::renderCreateTaskModal()
 {
+    std::string modalTitle = std::string(tr("task.modal_title")) + "###CreateTaskModal";
+
     if (m_showCreateTaskModal)
-        ImGui::OpenPopup("Créer une nouvelle tâche de flux");
+        ImGui::OpenPopup(modalTitle.c_str());
 
     ImGui::SetNextWindowSize(ImVec2(950.0f, 550.0f), ImGuiCond_Once);
     ImGui::SetNextWindowSizeConstraints(ImVec2(750.0f, 400.0f), ImVec2(1920.0f, 1080.0f));
 
-    if (ImGui::BeginPopupModal("Créer une nouvelle tâche de flux", &m_showCreateTaskModal, ImGuiWindowFlags_None))
+    if (ImGui::BeginPopupModal(modalTitle.c_str(), &m_showCreateTaskModal, ImGuiWindowFlags_None))
     {
-        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Studio d'Orchestration : Configuration Multi-Étapes", ICON_LC_ACTIVITY);
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_ACTIVITY, tr("task.modal_subtitle"));
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Nom du Pipeline Task (Workflow) :");
+        ImGui::Text("%s", tr("task.name_label"));
         ImGui::SameLine();
         ImGui::SetNextItemWidth(300.0f);
         if (ImGui::InputText("##TaskNameInput", m_newTaskNameBuf, IM_ARRAYSIZE(m_newTaskNameBuf)))
@@ -868,11 +966,11 @@ void Application::renderCreateTaskModal()
 
         // Panneau gauche : Formulaire d'étape
         ImGui::BeginChild("LeftStepFormPanel", ImVec2(form_panel_width, panel_height), true);
-        ImGui::TextColored(ImVec4(0.55f, 0.35f, 0.9f, 1.0f), "CONSTRUIRE UNE ÉTAPE");
+        ImGui::TextColored(ImVec4(0.55f, 0.35f, 0.9f, 1.0f), "%s", tr("task.build_step_header"));
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Index de l'étape (Step Index dans la Map) :");
+        ImGui::Text("%s", tr("task.step_index_label"));
         ImGui::SetNextItemWidth(120.0f);
         ImGui::InputInt("##StepIndexInput", &m_currentStepIndex, 1, 1);
         if (m_currentStepIndex < 1)
@@ -880,15 +978,19 @@ void Application::renderCreateTaskModal()
 
         ImGui::Spacing();
 
-        ImGui::Text("Nom de la Cible de calcul (name) :");
+        ImGui::Text("%s", tr("task.target_name_label"));
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##StepNameInput", m_newTaskStepNameBuf, IM_ARRAYSIZE(m_newTaskStepNameBuf));
 
         ImGui::Spacing();
 
-        ImGui::Text("Type de Target d'atterrissage (TargetType) :");
+        ImGui::Text("%s", tr("task.target_type_label"));
         ImGui::SetNextItemWidth(-1.0f);
-        const char *target_types_labels[] = {"Table physique (Table)", "Vue SQL (View)", "Table Temporaire (TemporaryTable)", "Sous-requête (SubQuery)"};
+        const char *target_types_labels[] = {
+            tr("task.target_table"),
+            tr("task.target_view"),
+            tr("task.target_temp_table"),
+            tr("task.target_subquery")};
         if (ImGui::BeginCombo("##TargetTypeComboSelector", target_types_labels[m_selectedTargetTypeIndex]))
         {
             for (int i = 0; i < 4; ++i)
@@ -902,18 +1004,18 @@ void Application::renderCreateTaskModal()
         if (m_selectedTargetTypeIndex == 0)
         {
             ImGui::Spacing();
-            ImGui::TextDisabled("Stratégie d'écriture de la Table :");
-            ImGui::RadioButton("Écraser (CTAS)", &m_tableOperationMode, 0);
+            ImGui::TextDisabled("%s", tr("task.write_strategy_label"));
+            ImGui::RadioButton(tr("task.strategy_ctas"), &m_tableOperationMode, 0);
             ImGui::SameLine();
-            ImGui::RadioButton("Ajouter à la suite (INSERT)", &m_tableOperationMode, 1);
+            ImGui::RadioButton(tr("task.strategy_insert"), &m_tableOperationMode, 1);
             ImGui::Spacing();
         }
 
         ImGui::Spacing();
 
-        ImGui::Text("Associer la requête SQL du graphe :");
+        ImGui::Text("%s", tr("task.select_query_label"));
         ImGui::SetNextItemWidth(-1.0f);
-        std::string combo_preview = "Sélectionner une requête...";
+        std::string combo_preview = tr("task.select_query_placeholder");
         if (m_selectedQueryIndexForTask >= 0 && m_selectedQueryIndexForTask < static_cast<int>(m_savedQueries.size()))
         {
             combo_preview = m_savedQueries[m_selectedQueryIndexForTask].name;
@@ -936,7 +1038,7 @@ void Application::renderCreateTaskModal()
         if (!is_step_valid)
             ImGui::BeginDisabled();
 
-        if (ImGui::Button((std::string(ICON_LC_PLUS_CIRCLE) + "  Ajouter cette étape au pipeline").c_str(), ImVec2(-1.0f, 30.0f)))
+        if (ImGui::Button((std::string(ICON_LC_PLUS_CIRCLE) + "  " + tr("task.btn_add_step")).c_str(), ImVec2(-1.0f, 30.0f)))
         {
             cppsqlx::UnitSelect currentUnit;
             currentUnit.name = m_newTaskStepNameBuf;
@@ -978,15 +1080,17 @@ void Application::renderCreateTaskModal()
         if (!is_step_valid)
             ImGui::EndDisabled();
         ImGui::EndChild();
+
         ImGui::SameLine();
+
         // Panneau droit : Récapitulatif des étapes
         ImGui::BeginChild("RightStepListPreviewPanel", ImVec2(preview_panel_width, panel_height), true);
-        ImGui::TextColored(ImVec4(0.25f, 0.75f, 0.45f, 1.0f), "SÉQUENCE DES ÉTAPES DE LA TÂCHE");
+        ImGui::TextColored(ImVec4(0.25f, 0.75f, 0.45f, 1.0f), "%s", tr("task.steps_sequence_header"));
         ImGui::Separator();
         ImGui::Spacing();
         if (m_workingTaskContext.steps().empty())
         {
-            ImGui::TextDisabled("Aucune étape insérée pour le moment.\nUtilisez le panneau de gauche pour peupler la tâche.");
+            ImGui::TextDisabled("%s", tr("task.no_steps_hint"));
         }
         else
         {
@@ -999,17 +1103,18 @@ void Application::renderCreateTaskModal()
                 if (unit.query.index() == 2)
                     type_str = "CTAS";
                 ImGui::Bullet();
-                ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "Étape %d :", stepId);
+                ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s %d :", tr("task.step_prefix"), stepId);
                 ImGui::SameLine();
                 ImGui::Text("[%s] -> %s", type_str.c_str(), unit.name.c_str());
                 ImGui::PopID();
             }
         }
         ImGui::EndChild();
+
         ImGui::Separator();
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 240.0f);
-        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
         {
             m_workingTaskContext = cppsqlx::Task();
             m_showCreateTaskModal = false;
@@ -1019,7 +1124,7 @@ void Application::renderCreateTaskModal()
         bool is_task_ready = (strlen(m_newTaskNameBuf) > 0) && (!m_workingTaskContext.steps().empty());
         if (!is_task_ready)
             ImGui::BeginDisabled();
-        if (ImGui::Button("Valider la Tâche", ImVec2(130.0f, 0.0f)))
+        if (ImGui::Button(tr("task.btn_validate"), ImVec2(130.0f, 0.0f)))
         {
             m_savedTasks.push_back(std::move(m_workingTaskContext));
             m_workingTaskContext = cppsqlx::Task();
@@ -1030,43 +1135,51 @@ void Application::renderCreateTaskModal()
         }
         if (!is_task_ready)
             ImGui::EndDisabled();
+
         ImGui::EndPopup();
     }
 }
 
 void Application::renderSaveProjectAsModal()
 {
+    std::string modalTitle = std::string(tr("save_as.modal_title")) + "###SaveProjectAsModal";
+
     if (m_showSaveProjectAsModal)
-        ImGui::OpenPopup("Enregistrer le projet sous");
+        ImGui::OpenPopup(modalTitle.c_str());
+
     ImGui::SetNextWindowSize(ImVec2(640.0f, 440.0f), ImGuiCond_Once);
     ImGui::SetNextWindowSizeConstraints(ImVec2(500.0f, 340.0f), ImVec2(1200.0f, 800.0f));
-    if (ImGui::BeginPopupModal("Enregistrer le projet sous", &m_showSaveProjectAsModal, ImGuiWindowFlags_None))
+
+    if (ImGui::BeginPopupModal(modalTitle.c_str(), &m_showSaveProjectAsModal, ImGuiWindowFlags_None))
     {
-        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Destination de sauvegarde du projet", ICON_LC_FOLDER_OPEN);
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_FOLDER_OPEN, tr("save_as.subtitle"));
         ImGui::Separator();
         ImGui::Spacing();
-        if (ImGui::Button(".. (Parent)"))
+
+        if (ImGui::Button(tr("browser.parent_dir")))
         {
             if (m_browserCurrentDir.has_parent_path())
                 m_browserCurrentDir = m_browserCurrentDir.parent_path();
         }
         ImGui::SameLine();
-        if (ImGui::Button((std::string(ICON_LC_PLUS_CIRCLE) + " Nouveau dossier").c_str()))
+        if (ImGui::Button((std::string(ICON_LC_PLUS_CIRCLE) + " " + tr("browser.new_folder")).c_str()))
         {
             m_showNewFolderInput = !m_showNewFolderInput;
             memset(m_newFolderNameBuf, 0, sizeof(m_newFolderNameBuf));
         }
+
         ImGui::Spacing();
-        ImGui::TextDisabled("Répertoire actuel :");
+        ImGui::TextDisabled("%s", tr("browser.current_dir"));
         ImGui::SameLine();
         ImGui::TextWrapped("%s", m_browserCurrentDir.string().c_str());
+
         if (m_showNewFolderInput)
         {
             ImGui::Spacing();
             ImGui::SetNextItemWidth(280.0f);
-            ImGui::InputTextWithHint("##NewFolderName", "Nom du nouveau répertoire...", m_newFolderNameBuf, IM_ARRAYSIZE(m_newFolderNameBuf));
+            ImGui::InputTextWithHint("##NewFolderName", tr("browser.new_folder_hint"), m_newFolderNameBuf, IM_ARRAYSIZE(m_newFolderNameBuf));
             ImGui::SameLine();
-            if (ImGui::Button("Créer") && strlen(m_newFolderNameBuf) > 0)
+            if (ImGui::Button(tr("btn.create")) && strlen(m_newFolderNameBuf) > 0)
             {
                 std::error_code ec;
                 std::filesystem::path targetNewDir = m_browserCurrentDir / m_newFolderNameBuf;
@@ -1078,12 +1191,15 @@ void Application::renderSaveProjectAsModal()
                 }
             }
             ImGui::SameLine();
-            if (ImGui::Button("Annuler##CancelDir"))
+            std::string cancelDirBtn = std::string(tr("btn.cancel")) + "##CancelDir";
+            if (ImGui::Button(cancelDirBtn.c_str()))
                 m_showNewFolderInput = false;
         }
+
         ImGui::Spacing();
         float listHeight = ImGui::GetContentRegionAvail().y - 85.0f;
         ImGui::BeginChild("DirectoryBrowserList", ImVec2(-1.0f, listHeight), true);
+
         std::error_code ec;
         std::vector<std::filesystem::directory_entry> dirs;
         std::vector<std::filesystem::directory_entry> files;
@@ -1097,10 +1213,12 @@ void Application::renderSaveProjectAsModal()
             else if (entry.is_regular_file(ec) && entry.path().extension() == ".json")
                 files.push_back(entry);
         }
+
         auto sortByName = [](const auto &a, const auto &b)
         { return a.path().filename() < b.path().filename(); };
         std::sort(dirs.begin(), dirs.end(), sortByName);
         std::sort(files.begin(), files.end(), sortByName);
+
         for (const auto &dir : dirs)
         {
             std::string label = std::string(ICON_LC_FOLDER_OPEN) + "  " + dir.path().filename().string();
@@ -1115,18 +1233,21 @@ void Application::renderSaveProjectAsModal()
                 strncpy(m_projectFileNameBuf, fname.c_str(), sizeof(m_projectFileNameBuf) - 1);
         }
         ImGui::EndChild();
+
         ImGui::Spacing();
         ImGui::AlignTextToFramePadding();
-        ImGui::Text("Nom du fichier :");
+        ImGui::Text("%s", tr("browser.file_name"));
         ImGui::SameLine();
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##ProjectFileNameInput", m_projectFileNameBuf, IM_ARRAYSIZE(m_projectFileNameBuf));
+
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
+
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 230.0f);
-        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
         {
             m_showSaveProjectAsModal = false;
             ImGui::CloseCurrentPopup();
@@ -1135,7 +1256,7 @@ void Application::renderSaveProjectAsModal()
         bool is_name_valid = (strlen(m_projectFileNameBuf) > 0);
         if (!is_name_valid)
             ImGui::BeginDisabled();
-        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.save"), ImVec2(120.0f, 0.0f)))
         {
             std::string fileName(m_projectFileNameBuf);
             if (fileName.find(".json") == std::string::npos)
@@ -1149,33 +1270,41 @@ void Application::renderSaveProjectAsModal()
         }
         if (!is_name_valid)
             ImGui::EndDisabled();
+
         ImGui::EndPopup();
     }
 }
 
 void Application::renderOpenProjectModal()
 {
+    std::string modalTitle = std::string(tr("open_project.modal_title")) + "###OpenProjectModal";
+
     if (m_showOpenProjectModal)
-        ImGui::OpenPopup("Ouvrir un projet");
+        ImGui::OpenPopup(modalTitle.c_str());
+
     ImGui::SetNextWindowSize(ImVec2(740.0f, 520.0f), ImGuiCond_Once);
     ImGui::SetNextWindowSizeConstraints(ImVec2(500.0f, 320.0f), ImVec2(1200.0f, 800.0f));
-    if (ImGui::BeginPopupModal("Ouvrir un projet", &m_showOpenProjectModal, ImGuiWindowFlags_None))
+
+    if (ImGui::BeginPopupModal(modalTitle.c_str(), &m_showOpenProjectModal, ImGuiWindowFlags_None))
     {
-        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Sélectionner un fichier projet (.json)", ICON_LC_FOLDER_OPEN);
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_FOLDER_OPEN, tr("open_project.subtitle"));
         ImGui::Separator();
         ImGui::Spacing();
-        if (ImGui::Button(".. (Parent)"))
+
+        if (ImGui::Button(tr("browser.parent_dir")))
         {
             if (m_browserCurrentDir.has_parent_path())
                 m_browserCurrentDir = m_browserCurrentDir.parent_path();
         }
         ImGui::SameLine();
-        ImGui::TextDisabled("Répertoire :");
+        ImGui::TextDisabled("%s", tr("browser.current_dir"));
         ImGui::SameLine();
         ImGui::TextWrapped("%s", m_browserCurrentDir.string().c_str());
         ImGui::Spacing();
+
         float listHeight = ImGui::GetContentRegionAvail().y - 75.0f;
         ImGui::BeginChild("OpenProjectBrowserList", ImVec2(-1.0f, listHeight), true);
+
         std::error_code ec;
         std::vector<std::filesystem::directory_entry> dirs;
         std::vector<std::filesystem::directory_entry> files;
@@ -1189,10 +1318,12 @@ void Application::renderOpenProjectModal()
             else if (entry.is_regular_file(ec) && entry.path().extension() == ".json")
                 files.push_back(entry);
         }
+
         auto sortByName = [](const auto &a, const auto &b)
         { return a.path().filename() < b.path().filename(); };
         std::sort(dirs.begin(), dirs.end(), sortByName);
         std::sort(files.begin(), files.end(), sortByName);
+
         for (const auto &dir : dirs)
         {
             std::string label = std::string(ICON_LC_FOLDER_OPEN) + "  " + dir.path().filename().string();
@@ -1219,16 +1350,18 @@ void Application::renderOpenProjectModal()
             }
         }
         ImGui::EndChild();
+
         ImGui::Spacing();
-        ImGui::TextDisabled("Fichier sélectionné :");
+        ImGui::TextDisabled("%s", tr("open_project.selected_file"));
         ImGui::SameLine();
-        ImGui::Text("%s", strlen(m_projectFileNameBuf) > 0 ? m_projectFileNameBuf : "(Aucun)");
+        ImGui::Text("%s", strlen(m_projectFileNameBuf) > 0 ? m_projectFileNameBuf : tr("common.none"));
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
+
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 230.0f);
-        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
         {
             m_showOpenProjectModal = false;
             ImGui::CloseCurrentPopup();
@@ -1237,7 +1370,7 @@ void Application::renderOpenProjectModal()
         bool can_open = (strlen(m_projectFileNameBuf) > 0);
         if (!can_open)
             ImGui::BeginDisabled();
-        if (ImGui::Button("Ouvrir", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.open"), ImVec2(120.0f, 0.0f)))
         {
             std::filesystem::path fullPath = m_browserCurrentDir / std::string(m_projectFileNameBuf);
             if (loadProjectFromFile(fullPath.string()))
@@ -1248,6 +1381,7 @@ void Application::renderOpenProjectModal()
         }
         if (!can_open)
             ImGui::EndDisabled();
+
         ImGui::EndPopup();
     }
 }
@@ -1255,20 +1389,23 @@ void Application::renderOpenProjectModal()
 void Application::renderRenameModals()
 {
     // 1. Modale : Renommer une requête
+    std::string renameQueryTitle = std::string(tr("rename.query_modal_title")) + "###RenameQueryModal";
     if (m_showRenameQueryModal)
-        ImGui::OpenPopup("Renommer la requête");
+        ImGui::OpenPopup(renameQueryTitle.c_str());
+
     ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
-    if (ImGui::BeginPopupModal("Renommer la requête", &m_showRenameQueryModal, ImGuiWindowFlags_NoResize))
+    if (ImGui::BeginPopupModal(renameQueryTitle.c_str(), &m_showRenameQueryModal, ImGuiWindowFlags_NoResize))
     {
-        ImGui::Text("Nouveau nom de la requête :");
+        ImGui::Text("%s", tr("rename.query_label"));
         ImGui::SetNextItemWidth(-1.0f);
         bool enterPressed = ImGui::InputText("##RenameQueryInput", m_renameQueryBuf, IM_ARRAYSIZE(m_renameQueryBuf), ImGuiInputTextFlags_EnterReturnsTrue);
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
+
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 210.0f);
-        if (ImGui::Button("Annuler", ImVec2(95.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(95.0f, 0.0f)))
         {
             m_showRenameQueryModal = false;
             m_renamingQueryIndex = -1;
@@ -1278,7 +1415,7 @@ void Application::renderRenameModals()
         bool isValid = (strlen(m_renameQueryBuf) > 0);
         if (!isValid)
             ImGui::BeginDisabled();
-        if (ImGui::Button("Valider", ImVec2(110.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.confirm"), ImVec2(110.0f, 0.0f)) || (enterPressed && isValid))
         {
             if (m_renamingQueryIndex >= 0 && m_renamingQueryIndex < static_cast<int>(m_savedQueries.size()))
             {
@@ -1300,27 +1437,32 @@ void Application::renderRenameModals()
                 }
             }
             m_showRenameQueryModal = false;
+            m_renamingQueryIndex = -1;
             ImGui::CloseCurrentPopup();
         }
         if (!isValid)
             ImGui::EndDisabled();
         ImGui::EndPopup();
     }
+
     // 2. Modale : Renommer un workflow
+    std::string renameWfTitle = std::string(tr("rename.workflow_modal_title")) + "###RenameWorkflowModal";
     if (m_showRenameWorkflowModal)
-        ImGui::OpenPopup("Renommer le workflow");
+        ImGui::OpenPopup(renameWfTitle.c_str());
+
     ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
-    if (ImGui::BeginPopupModal("Renommer le workflow", &m_showRenameWorkflowModal, ImGuiWindowFlags_NoResize))
+    if (ImGui::BeginPopupModal(renameWfTitle.c_str(), &m_showRenameWorkflowModal, ImGuiWindowFlags_NoResize))
     {
-        ImGui::Text("Nouveau nom du workflow :");
+        ImGui::Text("%s", tr("rename.workflow_label"));
         ImGui::SetNextItemWidth(-1.0f);
         bool enterPressed = ImGui::InputText("##RenameWorkflowInput", m_renameWorkflowBuf, IM_ARRAYSIZE(m_renameWorkflowBuf), ImGuiInputTextFlags_EnterReturnsTrue);
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
+
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 210.0f);
-        if (ImGui::Button("Annuler", ImVec2(95.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(95.0f, 0.0f)))
         {
             m_showRenameWorkflowModal = false;
             m_renamingWorkflowIndex = -1;
@@ -1330,7 +1472,7 @@ void Application::renderRenameModals()
         bool isValid = (strlen(m_renameWorkflowBuf) > 0);
         if (!isValid)
             ImGui::BeginDisabled();
-        if (ImGui::Button("Valider", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
+        if (ImGui::Button(tr("btn.confirm"), ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
         {
             if (m_renamingWorkflowIndex >= 0 && m_renamingWorkflowIndex < static_cast<int>(m_savedWorkflows.size()))
             {
@@ -1372,11 +1514,15 @@ void Application::renderStatusBar()
     {
         if (ImGui::BeginMenuBar())
         {
-            ImGui::TextDisabled("%s Outil connecté : %s | Environnement : %s | Graphe : %d nœuds actifs",
+            ImGui::TextDisabled("%s %s : %s | %s : %s | %s : %d %s",
                                 ICON_LC_ACTIVITY,
-                                m_selectedGateway.empty() ? "Aucun" : m_selectedGateway.c_str(),
-                                m_selectedContext.empty() ? "Aucun" : m_selectedContext.c_str(),
-                                static_cast<int>(m_visualQueryNodes.size()));
+                                tr("status.connected_tool"),
+                                m_selectedGateway.empty() ? tr("status.none") : m_selectedGateway.c_str(),
+                                tr("status.environment"),
+                                m_selectedContext.empty() ? tr("status.none") : m_selectedContext.c_str(),
+                                tr("status.graph"),
+                                static_cast<int>(m_visualQueryNodes.size()),
+                                tr("status.active_nodes"));
 
             // Alignement de la case à cocher Console tout à droite
             float checkWidth = 115.0f;
@@ -1386,11 +1532,12 @@ void Application::renderStatusBar()
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - checkWidth);
             }
 
-            if (ImGui::Checkbox((std::string(ICON_LC_TERMINAL) + " Console").c_str(), &m_showConsolePanel))
+            std::string consoleCheckLabel = std::string(ICON_LC_TERMINAL) + " " + tr("status.console") + "###StatusBarConsoleCheck";
+            if (ImGui::Checkbox(consoleCheckLabel.c_str(), &m_showConsolePanel))
             {
                 if (m_showConsolePanel)
                 {
-                    ImGui::SetWindowFocus("Console & Journaux d'Exécution");
+                    ImGui::SetWindowFocus("Console & Journaux d'Exécution###ConsoleBottomPanel");
                 }
             }
 
@@ -1409,26 +1556,27 @@ void Application::renderConnectionModals()
     // =========================================================================
     // MODALE 1 : CRÉER / ÉDITER UNE CONNEXION PHYSIQUE (AVEC TEST DE CONNEXION)
     // =========================================================================
+    std::string physModalTitle = std::string(tr("conn.phys_modal_title")) + "###PhysConnModal";
     if (m_showPhysConnModal)
-        ImGui::OpenPopup("Configuration Connexion Physique");
+        ImGui::OpenPopup(physModalTitle.c_str());
 
     ImGui::SetNextWindowSize(ImVec2(580.0f, 480.0f), ImGuiCond_Once);
-    if (ImGui::BeginPopupModal("Configuration Connexion Physique", &m_showPhysConnModal, ImGuiWindowFlags_NoResize))
+    if (ImGui::BeginPopupModal(physModalTitle.c_str(), &m_showPhysConnModal, ImGuiWindowFlags_NoResize))
     {
         ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_SERVER,
-                           m_isEditingPhysConn ? "Éditer la connexion PostgreSQL" : "Nouvelle connexion PostgreSQL");
+                           m_isEditingPhysConn ? tr("conn.phys_edit_subtitle") : tr("conn.phys_new_subtitle"));
         ImGui::Separator();
         ImGui::Spacing();
 
-        ImGui::Text("Nom de la connexion :");
+        ImGui::Text("%s", tr("conn.phys_name_label"));
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputTextWithHint("##PhysName", "ex: pg_dev_local", m_physConnNameBuf, IM_ARRAYSIZE(m_physConnNameBuf));
+        ImGui::InputTextWithHint("##PhysName", tr("conn.phys_name_hint"), m_physConnNameBuf, IM_ARRAYSIZE(m_physConnNameBuf));
 
         ImGui::Spacing();
 
         // Ligne Hôte + Port
         ImGui::BeginGroup();
-        ImGui::Text("Hôte (Host) :");
+        ImGui::Text("%s", tr("conn.host_label"));
         ImGui::SetNextItemWidth(310.0f);
         ImGui::InputText("##PhysHost", m_physConnHostBuf, IM_ARRAYSIZE(m_physConnHostBuf));
         ImGui::EndGroup();
@@ -1436,20 +1584,20 @@ void Application::renderConnectionModals()
         ImGui::SameLine();
 
         ImGui::BeginGroup();
-        ImGui::Text("Port :");
+        ImGui::Text("%s", tr("conn.port_label"));
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputInt("##PhysPort", &m_physConnPort, 0, 0);
         ImGui::EndGroup();
 
         ImGui::Spacing();
 
-        ImGui::Text("Base de données (dbname) :");
+        ImGui::Text("%s", tr("conn.dbname_label"));
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputTextWithHint("##PhysDbName", "ex: t_financedb", m_physConnDbNameBuf, IM_ARRAYSIZE(m_physConnDbNameBuf));
+        ImGui::InputTextWithHint("##PhysDbName", tr("conn.dbname_hint"), m_physConnDbNameBuf, IM_ARRAYSIZE(m_physConnDbNameBuf));
 
         ImGui::Spacing();
 
-        ImGui::Text("Utilisateur (user) :");
+        ImGui::Text("%s", tr("conn.user_label"));
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##PhysUser", m_physConnUserBuf, IM_ARRAYSIZE(m_physConnUserBuf));
 
@@ -1457,7 +1605,7 @@ void Application::renderConnectionModals()
 
         // Sélecteur Mode SSL
         const char *sslModes[] = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"};
-        ImGui::Text("Sécurité SSL (sslmode) :");
+        ImGui::Text("%s", tr("conn.ssl_label"));
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::BeginCombo("##PhysSslMode", sslModes[m_physConnSslModeIndex]))
         {
@@ -1471,16 +1619,15 @@ void Application::renderConnectionModals()
 
         ImGui::Spacing();
 
-        ImGui::Text("Mot de passe (optionnel) :");
+        ImGui::Text("%s", tr("conn.password_label"));
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##PhysPass", m_physConnPassBuf, IM_ARRAYSIZE(m_physConnPassBuf), ImGuiInputTextFlags_Password);
 
         ImGui::Spacing();
 
         // Bouton de test de connexion en direct
-        if (ImGui::Button((std::string(ICON_LC_PLAY) + "  Tester la connexion").c_str()))
+        if (ImGui::Button((std::string(ICON_LC_PLAY) + "  " + tr("conn.btn_test")).c_str()))
         {
-            // Dans "Tester la connexion" :
             std::string connStr = "dbname=" + std::string(m_physConnDbNameBuf) +
                                   " user=" + std::string(m_physConnUserBuf) +
                                   " host=" + std::string(m_physConnHostBuf) +
@@ -1493,13 +1640,13 @@ void Application::renderConnectionModals()
             if (auto res = testConn.connect(); res.has_value())
             {
                 m_physConnTestOk = true;
-                m_physConnTestStatus = "Connexion réussie !";
+                m_physConnTestStatus = tr("conn.test_success");
                 testConn.close();
             }
             else
             {
                 m_physConnTestOk = false;
-                m_physConnTestStatus = "Échec : " + res.error();
+                m_physConnTestStatus = std::string(tr("conn.test_failure")) + " : " + res.error();
             }
         }
 
@@ -1517,7 +1664,7 @@ void Application::renderConnectionModals()
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 230.0f);
 
-        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
         {
             m_showPhysConnModal = false;
             ImGui::CloseCurrentPopup();
@@ -1529,7 +1676,7 @@ void Application::renderConnectionModals()
         if (!canSavePhys)
             ImGui::BeginDisabled();
 
-        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.save"), ImVec2(120.0f, 0.0f)))
         {
             std::string newName(m_physConnNameBuf);
             cppsqlx::PhysicalConnection phys;
@@ -1561,13 +1708,14 @@ void Application::renderConnectionModals()
     // =========================================================================
     // MODALE 2 : RENOMMER UNE CONNEXION PHYSIQUE
     // =========================================================================
+    std::string renamePhysTitle = std::string(tr("conn.rename_phys_modal_title")) + "###RenamePhysConnModal";
     if (m_showRenamePhysConnModal)
-        ImGui::OpenPopup("Renommer la connexion physique");
+        ImGui::OpenPopup(renamePhysTitle.c_str());
 
     ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
-    if (ImGui::BeginPopupModal("Renommer la connexion physique", &m_showRenamePhysConnModal, ImGuiWindowFlags_NoResize))
+    if (ImGui::BeginPopupModal(renamePhysTitle.c_str(), &m_showRenamePhysConnModal, ImGuiWindowFlags_NoResize))
     {
-        ImGui::Text("Nouveau nom de la connexion physique :");
+        ImGui::Text("%s", tr("conn.rename_phys_label"));
         ImGui::SetNextItemWidth(-1.0f);
         bool enterPressed = ImGui::InputText("##RenamePhysInput", m_renamePhysConnBuf, IM_ARRAYSIZE(m_renamePhysConnBuf), ImGuiInputTextFlags_EnterReturnsTrue);
 
@@ -1578,7 +1726,8 @@ void Application::renderConnectionModals()
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 210.0f);
 
-        if (ImGui::Button("Annuler##PhysRen", ImVec2(95.0f, 0.0f)))
+        std::string cancelPhysBtn = std::string(tr("btn.cancel")) + "##PhysRen";
+        if (ImGui::Button(cancelPhysBtn.c_str(), ImVec2(95.0f, 0.0f)))
         {
             m_showRenamePhysConnModal = false;
             ImGui::CloseCurrentPopup();
@@ -1590,7 +1739,8 @@ void Application::renderConnectionModals()
         if (!isValid)
             ImGui::BeginDisabled();
 
-        if (ImGui::Button("Valider##PhysRen", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
+        std::string confirmPhysBtn = std::string(tr("btn.confirm")) + "##PhysRen";
+        if (ImGui::Button(confirmPhysBtn.c_str(), ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
         {
             std::string newName(m_renamePhysConnBuf);
             if (!m_renamingPhysConnOldName.empty() && m_renamingPhysConnOldName != newName &&
@@ -1610,148 +1760,4 @@ void Application::renderConnectionModals()
             ImGui::EndDisabled();
         ImGui::EndPopup();
     }
-
-    // =========================================================================
-    // MODALE 3 : CRÉER / ÉDITER UNE CONNEXION LOGIQUE (GATEWAY DEV / TEST / PROD)
-    // =========================================================================
-    if (m_showLogConnModal)
-        ImGui::OpenPopup("Configuration Connexion Logique");
-
-    ImGui::SetNextWindowSize(ImVec2(480.0f, 310.0f), ImGuiCond_Once);
-    if (ImGui::BeginPopupModal("Configuration Connexion Logique", &m_showLogConnModal, ImGuiWindowFlags_NoResize))
-    {
-        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_DATABASE,
-                           m_isEditingLogConn ? "Éditer la passerelle logique" : "Nouvelle passerelle logique");
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::Text("Nom de la passerelle (Gateway) :");
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputTextWithHint("##LogName", "ex: DWH_FINANCE", m_logConnNameBuf, IM_ARRAYSIZE(m_logConnNameBuf));
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        // Sélecteur réutilisable pour chaque environnement (DEV, TEST, PROD)
-        auto drawEnvSelector = [&](const char *envLabel, std::string &targetPhysName)
-        {
-            ImGui::AlignTextToFramePadding();
-            ImGui::Text("%-6s ->", envLabel);
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(-1.0f);
-
-            const char *preview = targetPhysName.empty() ? "(Aucune)" : targetPhysName.c_str();
-            if (ImGui::BeginCombo((std::string("##EnvCombo_") + envLabel).c_str(), preview))
-            {
-                if (ImGui::Selectable("(Aucune)", targetPhysName.empty()))
-                    targetPhysName = "";
-
-                for (const auto &[pName, pObj] : m_activeProject->physicalConnections())
-                {
-                    if (ImGui::Selectable(pName.c_str(), targetPhysName == pName))
-                        targetPhysName = pName;
-                }
-                ImGui::EndCombo();
-            }
-        };
-
-        drawEnvSelector("DEV", m_logConnDevTarget);
-        ImGui::Spacing();
-        drawEnvSelector("TEST", m_logConnTestTarget);
-        ImGui::Spacing();
-        drawEnvSelector("PROD", m_logConnProdTarget);
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        float avail_x = ImGui::GetContentRegionAvail().x;
-        ImGui::SetCursorPosX(avail_x - 230.0f);
-
-        if (ImGui::Button("Annuler##LogCfg", ImVec2(100.0f, 0.0f)))
-        {
-            m_showLogConnModal = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        bool canSaveLog = (strlen(m_logConnNameBuf) > 0);
-        if (!canSaveLog)
-            ImGui::BeginDisabled();
-        if (ImGui::Button("Enregistrer##LogCfg", ImVec2(120.0f, 0.0f)))
-        {
-            std::string gwName(m_logConnNameBuf);
-            cppsqlx::LogicalConnection gw(gwName);
-            auto assignEnvIfValid = [&](const std::string &envName, const std::string &physName)
-            {
-                if (!physName.empty() && m_activeProject->physicalConnections().contains(physName))
-                {
-                    gw.registerEnvironment(envName, m_activeProject->physicalConnections().at(physName));
-                }
-            };
-
-            assignEnvIfValid("DEV", m_logConnDevTarget);
-            assignEnvIfValid("TEST", m_logConnTestTarget);
-            assignEnvIfValid("PROD", m_logConnProdTarget);
-            if (m_isEditingLogConn && !m_originalLogConnName.empty() && m_originalLogConnName != gwName)
-            {
-                m_activeProject->logicalConnections().erase(m_originalLogConnName);
-            }
-            m_activeProject->logicalConnections()[gwName] = std::move(gw);
-            m_activeProject->resolveDependencies();
-            m_showLogConnModal = false;
-            ImGui::CloseCurrentPopup();
-        }
-        if (!canSaveLog)
-            ImGui::EndDisabled();
-        ImGui::EndPopup();
-    }
-    // =========================================================================
-    // MODALE 4 : RENOMMER UNE CONNEXION LOGIQUE
-    // =========================================================================
-    if (m_showRenameLogConnModal)
-        ImGui::OpenPopup("Renommer la connexion logique");
-    ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
-    if (ImGui::BeginPopupModal("Renommer la connexion logique", &m_showRenameLogConnModal, ImGuiWindowFlags_NoResize))
-    {
-        ImGui::Text("Nouveau nom de la passerelle logique :");
-        ImGui::SetNextItemWidth(-1.0f);
-        bool enterPressed = ImGui::InputText("##RenameLogInput", m_renameLogConnBuf, IM_ARRAYSIZE(m_renameLogConnBuf), ImGuiInputTextFlags_EnterReturnsTrue);
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        float avail_x = ImGui::GetContentRegionAvail().x;
-        ImGui::SetCursorPosX(avail_x - 210.0f);
-        if (ImGui::Button("Annuler##LogRen", ImVec2(95.0f, 0.0f)))
-        {
-            m_showRenameLogConnModal = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        bool isValid = (strlen(m_renameLogConnBuf) > 0);
-        if (!isValid)
-            ImGui::BeginDisabled();
-        if (ImGui::Button("Valider##LogRen", ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
-        {
-            std::string newName(m_renameLogConnBuf);
-            if (!m_renamingLogConnOldName.empty() && m_renamingLogConnOldName != newName &&
-                m_activeProject->logicalConnections().contains(m_renamingLogConnOldName))
-            {
-                cppsqlx::LogicalConnection gw = m_activeProject->logicalConnections().at(m_renamingLogConnOldName);
-                gw.setName(newName);
-                m_activeProject->logicalConnections().erase(m_renamingLogConnOldName);
-                m_activeProject->logicalConnections()[newName] = std::move(gw);
-                m_activeProject->resolveDependencies();
-                if (m_selectedGateway == m_renamingLogConnOldName)
-                    m_selectedGateway = newName;
-            }
-            m_showRenameLogConnModal = false;
-            ImGui::CloseCurrentPopup();
-        }
-        if (!isValid)
-            ImGui::EndDisabled();
-        ImGui::EndPopup();
-    }
 }
-
-

@@ -146,13 +146,23 @@ find_library(LOG4CXX_LIB
     REQUIRED
 )
 
+find_package(CURL REQUIRED)
+
 target_link_libraries(dizui PRIVATE 
     ${CPPSQLX_LIB}
     ${LOG4CXX_LIB}
     PostgreSQL::PostgreSQL
+    CURL::libcurl
 )
 
 set_target_properties(dizui PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE
     INSTALL_RPATH "${CPPSQLX_DIR}/build/src"
+)
+
+
+add_custom_command(TARGET dizui POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets"
+        "$<TARGET_FILE_DIR:dizui>/assets"
 )

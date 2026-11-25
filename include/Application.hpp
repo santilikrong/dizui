@@ -21,8 +21,6 @@
 #include <deque>
 #include <unordered_set>
 
-
-
 namespace ed = ax::NodeEditor;
 
 class Application
@@ -48,7 +46,6 @@ public:
 
     void run();
     void addConsoleLog(const std::string &msg, LogLevel level = LogLevel::Info);
-
 
 private:
     // =========================================================================
@@ -128,17 +125,16 @@ private:
         std::string customSqlCondition = ""; // Ex: "UPPER(emp.nom) LIKE 'M%' AND emp.actif = true"
     };
 
-
     struct VisualProjectionItem
     {
-        uintptr_t id;
+        uintptr_t id = 0;
         std::string alias;
         std::string sqlExpression;
         bool isAggregate = false;
         bool isCustomExpression = false;
-        uintptr_t sourceNodeId = 0; // Identifiant du nœud source (Table ou CTE)
+        uintptr_t sourceNodeId = 0;
+        bool isWindowFunction = false;
     };
-
 
     struct SavedQuery
     {
@@ -149,7 +145,6 @@ private:
         nlohmann::json compiledSelectJson;
         std::vector<cppsqlx::ColumnMetadata> outputSchema; // Colonnes déduites via LIMIT 0
     };
-
 
     struct WorkflowJobNode
     {
@@ -163,6 +158,9 @@ private:
 
         VisualJobStatus executionStatus = VisualJobStatus::Idle;
         std::string statusMessage = "";
+
+        int currentStep = 0;
+        int totalSteps = 0;
     };
 
     struct WorkflowJobLink
@@ -187,7 +185,6 @@ private:
         Nord,
         Dracula
     };
-
 
     // =========================================================================
     // 2. MÉTHODES DE RENDU DE L'INTERFACE (UI)
@@ -229,7 +226,7 @@ private:
     void renderExpressionEditorModal();
 
     void renderConnectionModals();
-        
+
     void applyTheme(AppTheme theme);
     void renderConsolePanel();
     void renderQueryResultsPanel();
@@ -276,9 +273,9 @@ private:
 
     cppsqlx::SelectQuery compileUnionGraphToSelectQuery();
 
-
-
-
+    void renderAiAssistantPanel();
+    void sendPromptToOllamaAsync(const std::string &userPrompt);
+    std::string buildProjectContextForAi() const;
 
     // =========================================================================
     // 3. MÉTHODES MÉTIER, COMPILATION ET PERSISTANCE
@@ -299,7 +296,6 @@ private:
     void loadQueryIntoVisualDesigner(const SavedQuery &savedQuery);
     void loadWorkflowIntoVisualDesigner(const SavedWorkflow &savedWorkflow);
     void createNewProject(const std::string &projectName = "Nouveau_Projet");
-
 
     // =========================================================================
     // 4. ATTRIBUTS MEMBRES (ÉTAT DE L'APPLICATION)
@@ -352,6 +348,7 @@ private:
     // États des modales et formulaires UI
     bool m_showReverseModal = false;
     std::string m_reverseSelectedSchema = "public";
+    std::set<std::string> m_reverseCheckedObjects;
     std::string m_reverseSelectedObject = "";
     std::vector<std::string> m_cachedSchemas;
     std::vector<std::string> m_cachedTables;
@@ -364,7 +361,6 @@ private:
     VisualQueryPredicate *m_editingPredicate = nullptr;
 
     char m_whereExprFormulaBuf[1024] = "";
-
 
     bool m_showSQLPreviewModal = false;
     bool m_showSaveQueryModal = false;
@@ -404,7 +400,6 @@ private:
     int m_renamingWorkflowIndex = -1;
     char m_renameWorkflowBuf[128] = "";
 
-
     // Projection unifiée (SelectionSet) et Nœud de Transformation
     std::vector<VisualProjectionItem> m_projectionItems;
     bool m_hasProjectionNode = false;
@@ -417,6 +412,7 @@ private:
     char m_exprAliasBuf[128] = "";
     char m_exprFormulaBuf[1024] = "";
     bool m_exprIsAggregate = false;
+    bool m_exprIsWindow = false;
 
     // Modale : Créer / Éditer une Connexion Physique
     bool m_showPhysConnModal = false;
@@ -452,8 +448,6 @@ private:
 
     int m_physConnSslModeIndex = 2; // 0: disable, 1: allow, 2: prefer (défaut), 3: require, 4: verify-ca, 5: verify-full
 
-
-    
     AppTheme m_currentTheme = AppTheme::DarkModern;
 
     // Console de logs en temps réel
@@ -486,8 +480,8 @@ private:
     // Autocomplétion dans l'éditeur SQL texte
     struct SqlCompletionCandidate
     {
-        std::string label;      // Texte inséré (ex: "t_employes" ou "matricule")
-        std::string detail;     // Type ou provenance (ex: "Table", "CTE", "t_employes (varchar)")
+        std::string label;  // Texte inséré (ex: "t_employes" ou "matricule")
+        std::string detail; // Type ou provenance (ex: "Table", "CTE", "t_employes (varchar)")
         bool isTableOrCte = false;
     };
 
@@ -513,4 +507,21 @@ private:
 
     bool m_cteStackHorizontal = true;
 
+    // État de l'Assistant IA (Ollama local)
+    struct AiChatMessage
+    {
+        bool isUser = true;
+        std::string text;
+        std::string extractedSql; // Bloc ```sql ... ``` extrait automatiquement s'il existe
+    };
+
+    std::vector<AiChatMessage> m_aiChatHistory;
+    std::array<char, 2048> m_aiPromptBuf{};
+    std::array<char, 128> m_aiOllamaUrlBuf{"http://localhost:11434/api/chat"};
+    std::array<char, 64> m_aiModelNameBuf{"qwen2.5-coder:7b"};
+    bool m_aiIncludeSchemaContext = true;
+    bool m_aiIncludeActiveSqlContext = true;
+    std::atomic<bool> m_isAiThinking{false};
+    std::mutex m_aiChatMutex;
+    bool m_aiScrollToBottom = false;
 };

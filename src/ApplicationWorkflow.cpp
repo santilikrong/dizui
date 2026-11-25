@@ -1,4 +1,5 @@
 #include "Application.hpp"
+#include <Localization.hpp>
 #include "IconsLucide.hpp"
 #include <cppsqlx/task.hpp>
 #include <cppsqlx/job.hpp>
@@ -14,7 +15,6 @@
 
 namespace ed = ax::NodeEditor;
 
-
 void Application::renderWorkflowEditor()
 {
     renderWorkflowToolbar();
@@ -23,13 +23,12 @@ void Application::renderWorkflowEditor()
     renderWorkflowModals();
 }
 
-
 void Application::renderWorkflowToolbar()
 {
     ImGui::BeginChild("WorkflowHeaderBandeau", ImVec2(-1.0f, 45.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     ImGui::SetCursorPosY((45.0f - ImGui::GetTextLineHeight()) * 0.5f);
-    ImGui::TextDisabled("%s  WORKFLOW :", ICON_LC_ACTIVITY);
+    ImGui::TextDisabled("%s  %s :", ICON_LC_ACTIVITY, tr("wf_toolbar.label"));
 
     ImGui::SameLine();
     ImGui::SetCursorPosY((45.0f - ImGui::GetFrameHeight()) * 0.5f);
@@ -55,7 +54,7 @@ void Application::renderWorkflowToolbar()
         ed::NavigateToContent();
         ed::SetCurrentEditor(nullptr);
     }
-    ImGui::SetItemTooltip("Recentrer la vue sur le workflow");
+    ImGui::SetItemTooltip("%s", tr("wf_toolbar.recenter_tooltip"));
 
     // BOUTON 1 : Visualiser le JSON
     ImGui::SameLine();
@@ -65,7 +64,7 @@ void Application::renderWorkflowToolbar()
         m_compiledWorkflowJson = compileWorkflowToJSON(std::string(m_activeWorkflowNameBuf));
         m_showWorkflowJsonModal = true;
     }
-    ImGui::SetItemTooltip("Visualiser le JSON généré par ce workflow");
+    ImGui::SetItemTooltip("%s", tr("wf_toolbar.view_json_tooltip"));
 
     // BOUTON 2 : Ajouter au Projet
     ImGui::SameLine();
@@ -76,7 +75,7 @@ void Application::renderWorkflowToolbar()
         strncpy(m_saveWorkflowDescBuf, m_activeWorkflowDescBuf, sizeof(m_saveWorkflowDescBuf) - 1);
         m_showSaveWorkflowModal = true;
     }
-    ImGui::SetItemTooltip("Enregistrer ce workflow dans le projet");
+    ImGui::SetItemTooltip("%s", tr("wf_toolbar.save_tooltip"));
 
     // BOUTON 3 : Effacer le canevas
     ImGui::SameLine();
@@ -89,7 +88,7 @@ void Application::renderWorkflowToolbar()
         m_liveJobStatuses.clear();
         m_liveJobMessages.clear();
     }
-    ImGui::SetItemTooltip("Nettoyer intégralement le canevas de workflow");
+    ImGui::SetItemTooltip("%s", tr("wf_toolbar.clear_tooltip"));
 
     // BOUTON 4 : Exécuter le workflow
     ImGui::SameLine();
@@ -107,13 +106,12 @@ void Application::renderWorkflowToolbar()
     }
     if (isRunning)
         ImGui::EndDisabled();
-    ImGui::SetItemTooltip(isRunning ? "Exécution en cours..." : "Configurer et exécuter ce workflow");
+    ImGui::SetItemTooltip("%s", isRunning ? tr("wf_toolbar.running_tooltip") : tr("wf_toolbar.run_tooltip"));
 
     ImGui::PopStyleVar(1);
     ImGui::PopStyleColor(4);
     ImGui::EndChild();
 }
-
 
 void Application::renderWorkflowCanvas()
 {
@@ -179,34 +177,46 @@ void Application::renderWorkflowCanvas()
         ImVec4 nodeBgColor = ImVec4(0.11f, 0.16f, 0.25f, 0.95f);
         ImVec4 borderColor = ImVec4(0.25f, 0.45f, 0.75f, 1.0f);
         ImVec4 statusTextColor = ImVec4(0.45f, 0.70f, 1.0f, 1.0f);
-        const char *statusTag = "Job (En attente)";
+        const char *statusTag = tr("wf_node.status_idle");
 
         if (node.executionStatus == VisualJobStatus::Running)
         {
             nodeBgColor = ImVec4(0.22f, 0.12f, 0.32f, 0.95f);
             borderColor = ImVec4(0.65f, 0.30f, 0.95f, 1.0f);
             statusTextColor = ImVec4(0.80f, 0.50f, 1.0f, 1.0f);
-            statusTag = "Job (En cours...)";
+            statusTag = tr("wf_node.status_running");
         }
         else if (node.executionStatus == VisualJobStatus::Success)
         {
             nodeBgColor = ImVec4(0.10f, 0.24f, 0.16f, 0.95f);
             borderColor = ImVec4(0.20f, 0.80f, 0.40f, 1.0f);
             statusTextColor = ImVec4(0.30f, 0.90f, 0.50f, 1.0f);
-            statusTag = "Job (OK)";
+            statusTag = tr("wf_node.status_success");
         }
         else if (node.executionStatus == VisualJobStatus::Failed)
         {
             nodeBgColor = ImVec4(0.28f, 0.10f, 0.12f, 0.95f);
             borderColor = ImVec4(0.90f, 0.25f, 0.25f, 1.0f);
             statusTextColor = ImVec4(0.95f, 0.40f, 0.40f, 1.0f);
-            statusTag = "Job (KO)";
+            statusTag = tr("wf_node.status_failed");
         }
 
         ed::PushStyleColor(ed::StyleColor_NodeBg, nodeBgColor);
         ed::PushStyleColor(ed::StyleColor_NodeBorder, borderColor);
         ed::PushStyleVar(ed::StyleVar_NodePadding, ImVec4(0.0f, 10.0f, 0.0f, 10.0f));
         ed::PushStyleVar(ed::StyleVar_NodeRounding, 6.0f);
+
+        // Lecture thread-safe de l'état et de l'avancement des étapes du nœud
+        VisualJobStatus currentJobStatus = VisualJobStatus::Idle;
+        int stepCur = 0;
+        int stepTot = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
+            if (m_liveJobStatuses.contains(node.taskName))
+                currentJobStatus = m_liveJobStatuses[node.taskName];
+            stepCur = node.currentStep;
+            stepTot = node.totalSteps;
+        }
 
         ed::BeginNode(node.id);
         ImGui::BeginGroup();
@@ -216,6 +226,33 @@ void Application::renderWorkflowCanvas()
 
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
         ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.85f), "%s", node.taskName.c_str());
+
+        // Affichage épuré sans fond de l'avancement en nombre d'étapes et pourcentage
+        if (stepTot > 0 && (currentJobStatus == VisualJobStatus::Running ||
+                            currentJobStatus == VisualJobStatus::Success ||
+                            currentJobStatus == VisualJobStatus::Failed))
+        {
+            float fraction = std::clamp(static_cast<float>(stepCur) / static_cast<float>(stepTot), 0.0f, 1.0f);
+            int percent = static_cast<int>(fraction * 100.0f);
+
+            ImVec4 progressColor = ImVec4(0.35f, 0.85f, 0.50f, 1.0f);
+            const char *stepIcon = ICON_LC_CHECK;
+
+            if (currentJobStatus == VisualJobStatus::Running)
+            {
+                progressColor = ImVec4(0.95f, 0.72f, 0.25f, 1.0f);
+                stepIcon = ICON_LC_LOADER;
+            }
+            else if (currentJobStatus == VisualJobStatus::Failed)
+            {
+                progressColor = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+                stepIcon = ICON_LC_X;
+            }
+
+            ImGui::Spacing();
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
+            ImGui::TextColored(progressColor, "%s  %d / %d (%d%%)", stepIcon, stepCur, stepTot, percent);
+        }
 
         ImGui::Spacing();
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
@@ -262,7 +299,7 @@ void Application::renderWorkflowCanvas()
 
         if (ImGui::IsItemHovered() && !node.statusMessage.empty())
         {
-            ImGui::SetItemTooltip("Statut : %s", node.statusMessage.c_str());
+            ImGui::SetItemTooltip("%s : %s", tr("sql_exec.col_status"), node.statusMessage.c_str());
         }
     }
 
@@ -326,63 +363,75 @@ void Application::renderWorkflowCanvas()
     ImGui::EndChild();
 }
 
-
 void Application::renderWorkflowModals()
 {
     // MODALE 1 : APERÇU DU JSON DU WORKFLOW
+    // MODALE 1 : APERÇU JSON DU WORKFLOW
+    std::string wfJsonModalTitle = std::string(tr("wf_modal.json_title")) + "###WorkflowJsonModal";
     if (m_showWorkflowJsonModal)
-        ImGui::OpenPopup("Aperçu JSON du Workflow");
+        ImGui::OpenPopup(wfJsonModalTitle.c_str());
+
     ImGui::SetNextWindowSize(ImVec2(800.0f, 550.0f), ImGuiCond_Once);
     ImGui::SetNextWindowSizeConstraints(ImVec2(450.0f, 250.0f), ImVec2(1600.0f, 900.0f));
-    if (ImGui::BeginPopupModal("Aperçu JSON du Workflow", &m_showWorkflowJsonModal, ImGuiWindowFlags_None))
+    if (ImGui::BeginPopupModal(wfJsonModalTitle.c_str(), &m_showWorkflowJsonModal, ImGuiWindowFlags_None))
     {
-        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Structure JSON d'orchestration", ICON_LC_BOX);
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_BOX, tr("wf_modal.json_subtitle"));
         ImGui::Separator();
         ImGui::Spacing();
+
         float text_area_height = ImGui::GetContentRegionAvail().y - 45.0f;
         ImGui::InputTextMultiline("##WorkflowJsonPreviewArea",
                                   const_cast<char *>(m_compiledWorkflowJson.c_str()), m_compiledWorkflowJson.length() + 1,
                                   ImVec2(-1.0f, text_area_height), ImGuiInputTextFlags_ReadOnly);
+
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
+
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail_x - 120.0f);
-        if (ImGui::Button("Fermer", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.close"), ImVec2(120.0f, 0.0f)))
         {
             m_showWorkflowJsonModal = false;
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
+
     // MODALE 2 : ENREGISTREMENT DU WORKFLOW DANS LE PROJET
+    std::string saveWfModalTitle = std::string(tr("wf_modal.save_title")) + "###SaveWorkflowModal";
     if (m_showSaveWorkflowModal)
-        ImGui::OpenPopup("Enregistrer le Workflow dans le Projet");
+        ImGui::OpenPopup(saveWfModalTitle.c_str());
+
     ImGui::SetNextWindowSize(ImVec2(460.0f, 240.0f), ImGuiCond_Once);
-    if (ImGui::BeginPopupModal("Enregistrer le Workflow dans le Projet", &m_showSaveWorkflowModal, ImGuiWindowFlags_NoResize))
+    if (ImGui::BeginPopupModal(saveWfModalTitle.c_str(), &m_showSaveWorkflowModal, ImGuiWindowFlags_NoResize))
     {
-        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  Ajout au catalogue des workflows", ICON_LC_FOLDER_OPEN);
+        ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_FOLDER_OPEN, tr("wf_modal.save_subtitle"));
         ImGui::Separator();
         ImGui::Spacing();
-        ImGui::Text("Nom du Workflow :");
+
+        ImGui::Text("%s", tr("wf_modal.name_label"));
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##WorkflowNameInput", m_saveWorkflowNameBuf, IM_ARRAYSIZE(m_saveWorkflowNameBuf));
+
         ImGui::Spacing();
-        ImGui::Text("Description :");
+        ImGui::Text("%s", tr("wf_modal.desc_label"));
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputTextMultiline("##WorkflowDescInput", m_saveWorkflowDescBuf, IM_ARRAYSIZE(m_saveWorkflowDescBuf), ImVec2(-1.0f, 60.0f));
+
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
+
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 230.0f);
-        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
         {
             m_showSaveWorkflowModal = false;
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Enregistrer", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.save"), ImVec2(120.0f, 0.0f)))
         {
             if (strlen(m_saveWorkflowNameBuf) > 0)
             {
@@ -393,6 +442,7 @@ void Application::renderWorkflowModals()
                 std::string wfName(m_saveWorkflowNameBuf);
                 std::string wfDesc(m_saveWorkflowDescBuf);
                 std::string wfJson = compileWorkflowToJSON(wfName);
+
                 nlohmann::json wfVisualState;
                 wfVisualState["nodes"] = nlohmann::json::array();
                 ed::SetCurrentEditor(m_workflowContext);
@@ -407,6 +457,7 @@ void Application::renderWorkflowModals()
                                                       {"outputPinId", n.outputPinId}});
                 }
                 ed::SetCurrentEditor(nullptr);
+
                 wfVisualState["links"] = nlohmann::json::array();
                 for (const auto &l : m_workflowLinks)
                 {
@@ -414,6 +465,7 @@ void Application::renderWorkflowModals()
                                                       {"startPinId", l.startPinId},
                                                       {"endPinId", l.endPinId}});
                 }
+
                 SavedWorkflow updatedWf{wfName, wfDesc, wfJson, wfVisualState};
                 auto it = std::find_if(m_savedWorkflows.begin(), m_savedWorkflows.end(),
                                        [&wfName](const SavedWorkflow &w)
@@ -422,6 +474,7 @@ void Application::renderWorkflowModals()
                     *it = std::move(updatedWf);
                 else
                     m_savedWorkflows.push_back(std::move(updatedWf));
+
                 m_showSaveWorkflowModal = false;
                 ImGui::CloseCurrentPopup();
             }
@@ -429,12 +482,14 @@ void Application::renderWorkflowModals()
         ImGui::EndPopup();
     }
     // MODALE 3 : PARAMÈTRES D'EXÉCUTION DU WORKFLOW
+    std::string runWfModalTitle = std::string(tr("wf_modal.run_title")) + "###RunWorkflowModal";
     if (m_showRunWorkflowModal)
-        ImGui::OpenPopup("Exécuter le Workflow");
+        ImGui::OpenPopup(runWfModalTitle.c_str());
+
     ImGui::SetNextWindowSize(ImVec2(450.0f, 230.0f), ImGuiCond_Once);
-    if (ImGui::BeginPopupModal("Exécuter le Workflow", &m_showRunWorkflowModal, ImGuiWindowFlags_NoResize))
+    if (ImGui::BeginPopupModal(runWfModalTitle.c_str(), &m_showRunWorkflowModal, ImGuiWindowFlags_NoResize))
     {
-        ImGui::TextColored(ImVec4(0.3f, 0.85f, 0.45f, 1.0f), "%s  Configuration du contexte d'exécution", ICON_LC_PLAY);
+        ImGui::TextColored(ImVec4(0.3f, 0.85f, 0.45f, 1.0f), "%s  %s", ICON_LC_PLAY, tr("wf_modal.run_subtitle"));
         ImGui::Separator();
         ImGui::Spacing();
 
@@ -448,17 +503,17 @@ void Application::renderWorkflowModals()
                     gatewayNames.push_back(gwName);
             }
         }
-        ImGui::Text("Connexion logique (Gateway) :");
+        ImGui::Text("%s", tr("wf_modal.gateway_label"));
         ImGui::SetNextItemWidth(-1.0f);
         if (gatewayNames.empty())
         {
-            ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.4f, 1.0f), "Aucune connexion logique disponible dans le projet.");
+            ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.4f, 1.0f), "%s", tr("wf_modal.no_gateway_error"));
         }
         else
         {
             if (m_selectedRunGatewayIndex >= static_cast<int>(gatewayNames.size()))
-
                 m_selectedRunGatewayIndex = 0;
+
             if (ImGui::BeginCombo("##RunGatewayCombo", gatewayNames[m_selectedRunGatewayIndex].c_str()))
             {
                 for (int i = 0; i < static_cast<int>(gatewayNames.size()); ++i)
@@ -471,7 +526,7 @@ void Application::renderWorkflowModals()
         }
         ImGui::Spacing();
         const char *envContexts[] = {"DEV", "TEST", "PROD"};
-        ImGui::Text("Environnement cible :");
+        ImGui::Text("%s", tr("wf_modal.target_env_label"));
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::BeginCombo("##RunEnvContextCombo", envContexts[m_selectedRunContextIndex]))
         {
@@ -487,7 +542,7 @@ void Application::renderWorkflowModals()
         ImGui::Spacing();
         float avail_x = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(avail_x - 230.0f);
-        if (ImGui::Button("Annuler", ImVec2(100.0f, 0.0f)))
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
         {
             m_showRunWorkflowModal = false;
             ImGui::CloseCurrentPopup();
@@ -496,7 +551,7 @@ void Application::renderWorkflowModals()
         bool canLaunch = !gatewayNames.empty();
         if (!canLaunch)
             ImGui::BeginDisabled();
-        if (ImGui::Button("Lancer", ImVec2(120.0f, 0.0f)))
+        if (ImGui::Button(tr("wf_modal.btn_launch"), ImVec2(120.0f, 0.0f)))
         {
             launchWorkflowExecutionAsync(
                 gatewayNames[m_selectedRunGatewayIndex],
@@ -509,7 +564,6 @@ void Application::renderWorkflowModals()
         ImGui::EndPopup();
     }
 }
-
 
 std::string Application::compileWorkflowToJSON(const std::string &workflowName)
 {
@@ -571,7 +625,6 @@ std::string Application::compileWorkflowToJSON(const std::string &workflowName)
     return workflow.toJSON().dump(4);
 }
 
-
 void Application::launchWorkflowExecutionAsync(const std::string &logicalConnName, const std::string &envContext)
 {
     if (m_isWorkflowRunning.load() || !m_activeProject)
@@ -582,7 +635,9 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
     auto it = gateways.find(logicalConnName);
     if (it == gateways.end())
     {
-        std::cerr << "[dizui Erreur] Passerelle logique introuvable : '" << logicalConnName << "'" << std::endl;
+        std::string errMsg = std::string(tr("wf_exec.gateway_not_found")) + " : '" + logicalConnName + "'";
+        std::cerr << "[dizui] " << errMsg << std::endl;
+        addConsoleLog(errMsg, LogLevel::Error);
         return;
     }
 
@@ -595,7 +650,9 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
     auto configCheck = it->second.getConfiguration(envContext);
     if (!configCheck.has_value())
     {
-        std::cerr << "[dizui Erreur] Impossible de lancer le workflow : " << configCheck.error() << std::endl;
+        std::string errMsg = std::string(tr("wf_exec.launch_failed")) + " : " + configCheck.error();
+        std::cerr << "[dizui] " << errMsg << std::endl;
+        addConsoleLog(errMsg, LogLevel::Error);
         return;
     }
 
@@ -606,19 +663,32 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
 
     if (!wfRes.has_value())
     {
-        std::cerr << "[dizui Erreur] Impossible d'initialiser le Workflow : " << wfRes.error() << std::endl;
+        std::string errMsg = std::string(tr("wf_exec.init_failed")) + " : " + wfRes.error();
+        std::cerr << "[dizui] " << errMsg << std::endl;
+        addConsoleLog(errMsg, LogLevel::Error);
         return;
     }
 
-    // 1. Initialisation de tous les jobs en statut "En attente" (Bleu foncé par défaut)
+    // 4. Initialisation de tous les jobs en statut "En attente" et calcul du total d'étapes par tâche
     {
         std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
         m_liveJobStatuses.clear();
         m_liveJobMessages.clear();
-        for (const auto &node : m_workflowNodes)
+
+        const auto &projectTasks = m_activeProject->tasks();
+        for (auto &node : m_workflowNodes)
         {
             m_liveJobStatuses[node.taskName] = VisualJobStatus::Idle;
-            m_liveJobMessages[node.taskName] = "En attente d'exécution";
+            m_liveJobMessages[node.taskName] = tr("wf_node.msg_pending");
+
+            node.currentStep = 0;
+            node.totalSteps = 0;
+
+            auto taskIt = projectTasks.find(node.taskName);
+            if (taskIt != projectTasks.end())
+            {
+                node.totalSteps = static_cast<int>(taskIt->second.steps().size());
+            }
         }
     }
 
@@ -632,7 +702,6 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
                 {
         try
         {
-            // Passage du callback temps réel à Workflow::run
             workflowPtr->run(targetGateway, envContext, [this](const std::string& jobName, cppsqlx::JobStatus status, const std::string& msg) {
                 std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
                 m_liveJobMessages[jobName] = msg;
@@ -645,6 +714,49 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
                     m_liveJobStatuses[jobName] = VisualJobStatus::Failed;
                 else
                     m_liveJobStatuses[jobName] = VisualJobStatus::Idle;
+
+                // Mise à jour de l'avancement des étapes sur les nœuds correspondants
+                for (auto &node : m_workflowNodes)
+                {
+                    if (node.taskName != jobName)
+                        continue;
+
+                    if (status == cppsqlx::JobStatus::Success)
+                    {
+                        if (node.totalSteps > 0)
+                            node.currentStep = node.totalSteps;
+                    }
+                    else if (status == cppsqlx::JobStatus::Running)
+                    {
+                        // Détection d'un message de progression détaillé (ex: "STEP:2/5" ou "Step 2/5")
+                        size_t sepPos = msg.find('/');
+                        if (sepPos != std::string::npos && sepPos > 0)
+                        {
+                            size_t startDigits = sepPos;
+                            while (startDigits > 0 && std::isdigit(static_cast<unsigned char>(msg[startDigits - 1])))
+                                --startDigits;
+
+                            size_t endDigits = sepPos + 1;
+                            while (endDigits < msg.size() && std::isdigit(static_cast<unsigned char>(msg[endDigits])))
+                                ++endDigits;
+
+                            if (startDigits < sepPos && endDigits > sepPos + 1)
+                            {
+                                try
+                                {
+                                    int cur = std::stoi(msg.substr(startDigits, sepPos - startDigits));
+                                    int tot = std::stoi(msg.substr(sepPos + 1, endDigits - (sepPos + 1)));
+                                    node.currentStep = cur;
+                                    if (tot > 0)
+                                        node.totalSteps = tot;
+                                }
+                                catch (...)
+                                {
+                                }
+                            }
+                        }
+                    }
+                }
             });
         }
         catch (const std::exception& e)
@@ -655,7 +767,6 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
         m_isWorkflowRunning.store(false); })
         .detach();
 }
-
 
 void Application::loadWorkflowIntoVisualDesigner(const SavedWorkflow &savedWorkflow)
 {
@@ -700,7 +811,6 @@ void Application::loadWorkflowIntoVisualDesigner(const SavedWorkflow &savedWorkf
     m_needsWorkflowCentering = true;
 }
 
-
 void Application::addConsoleLog(const std::string &msg, LogLevel level)
 {
     auto now = std::chrono::system_clock::now();
@@ -725,7 +835,6 @@ void Application::addConsoleLog(const std::string &msg, LogLevel level)
     }
 }
 
-
 void Application::renderConsolePanel()
 {
     if (!m_showConsolePanel)
@@ -737,7 +846,8 @@ void Application::renderConsolePanel()
     }
 
     ImGui::SetNextWindowSize(ImVec2(800.0f, 180.0f), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Console & Journaux d'Exécution", &m_showConsolePanel))
+    std::string consoleTitle = std::string(tr("panel.console")) + "###ConsoleBottomPanel";
+    if (ImGui::Begin(consoleTitle.c_str(), &m_showConsolePanel))
     {
         // Mémorise en continu le DockID du panneau inférieur tant qu'il est docké
         ImGuiID currentDockId = ImGui::GetWindowDockID();
@@ -747,18 +857,20 @@ void Application::renderConsolePanel()
         }
 
         // Barre d'outils supérieure de la console
-        if (ImGui::SmallButton((std::string(ICON_LC_TRASH) + "  Effacer").c_str()))
+        std::string clearBtnLabel = std::string(ICON_LC_TRASH) + "  " + tr("sql_editor.btn_clear") + "###ClearConsoleBtn";
+        if (ImGui::SmallButton(clearBtnLabel.c_str()))
         {
             std::lock_guard<std::mutex> lock(m_consoleMutex);
             m_consoleLogs.clear();
         }
 
         ImGui::SameLine();
-        ImGui::Checkbox("Défilement auto", &m_consoleAutoScroll);
+        std::string autoScrollLabel = std::string(tr("console.auto_scroll")) + "###ConsoleAutoScrollCheck";
+        ImGui::Checkbox(autoScrollLabel.c_str(), &m_consoleAutoScroll);
 
         ImGui::SameLine();
         ImGui::SetNextItemWidth(240.0f);
-        ImGui::InputTextWithHint("##ConsoleFilter", "Filtrer les logs...", m_consoleFilterBuf, IM_ARRAYSIZE(m_consoleFilterBuf));
+        ImGui::InputTextWithHint("##ConsoleFilter", tr("console.filter_hint"), m_consoleFilterBuf, IM_ARRAYSIZE(m_consoleFilterBuf));
 
         ImGui::Separator();
 
@@ -797,6 +909,3 @@ void Application::renderConsolePanel()
     }
     ImGui::End();
 }
-
-
-
