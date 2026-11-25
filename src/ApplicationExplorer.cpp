@@ -146,14 +146,15 @@ void Application::renderProjectExplorerTree()
                 bool log_open = ImGui::TreeNode(logRootLabel.c_str());
                 if (ImGui::BeginPopupContextItem("LogConnsRootContext", ImGuiPopupFlags_MouseButtonRight))
                 {
-                    if (ImGui::Selectable((std::string(ICON_LC_PLUS_CIRCLE) + "  " + tr("explorer.ctx_create_log")).c_str()))
+                    std::string createLogLabel = std::string(ICON_LC_PLUS_CIRCLE) + "  " + tr("explorer.ctx_create_log") + "###CreateLogConnItem";
+                    if (ImGui::MenuItem(createLogLabel.c_str()))
                     {
                         m_isEditingLogConn = false;
-                        m_originalLogConnName = "";
+                        m_originalLogConnName.clear();
                         memset(m_logConnNameBuf, 0, sizeof(m_logConnNameBuf));
-                        m_logConnDevTarget = "";
-                        m_logConnTestTarget = "";
-                        m_logConnProdTarget = "";
+                        m_logConnDevTarget.clear();
+                        m_logConnTestTarget.clear();
+                        m_logConnProdTarget.clear();
                         m_showLogConnModal = true;
                     }
                     ImGui::EndPopup();

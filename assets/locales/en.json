@@ -340,5 +340,19 @@
     "project.load_exception": "Failed to load project",
     "reverse.btn_select_all": "Select All",
     "reverse.btn_deselect_all": "Deselect All",
-    "reverse.log_imported_count": "table(s) imported into project."
+    "reverse.log_imported_count": "table(s) imported into project.",
+    "menu.quit": "Quit",
+    "menu.about": "About dizui Studio",
+    "about.modal_title": "About dizui Studio",
+    "about.description": "Visual data integration environment for SQL query design (CTEs, window functions) and PostgreSQL pipeline orchestration.",
+    "about.tech_stack_label": "Built with",
+    "about.version_label": "Version",
+    "menu.toggle_console": "Show / Hide Console",
+    "edit_menu.format_sql": "Format SQL",
+    "edit_menu.copy_compiled_sql": "Copy Compiled SQL",
+    "edit_menu.sync_from_designer": "Sync from Designer",
+    "edit_menu.clear_sql_editor": "Clear SQL Editor",
+    "edit_menu.log_formatted": "SQL query formatted in editor.",
+    "edit_menu.log_copied_clipboard": "Compiled SQL copied to clipboard.",
+    "edit_menu.log_cleared": "SQL editor cleared."
 }

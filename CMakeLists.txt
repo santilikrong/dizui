@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(dizui LANGUAGES CXX)
+project(dizui VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -90,6 +90,7 @@ add_executable(dizui ${PROJECT_SOURCES} ${PROJECT_HEADERS})
 
 target_compile_definitions(dizui PRIVATE 
     DIZUI_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    DIZUI_VERSION="${PROJECT_VERSION}"
 )
 
 target_include_directories(dizui PRIVATE include)
@@ -166,3 +167,12 @@ add_custom_command(TARGET dizui POST_BUILD
         "${CMAKE_SOURCE_DIR}/assets"
         "$<TARGET_FILE_DIR:dizui>/assets"
 )
+
+add_custom_target(copy_assets ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+        "$<TARGET_FILE_DIR:dizui>/assets"
+    COMMENT "Synchronisation des ressources (assets/locales)..."
+)
+
+add_dependencies(dizui copy_assets)

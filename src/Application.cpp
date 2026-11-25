@@ -1,5 +1,7 @@
 #include "Application.hpp"
 #include <Localization.hpp>
+#include "AboutModal.hpp"
+#include "SqlEditorHelpers.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <GLFW/glfw3.h>
@@ -273,6 +275,29 @@ void Application::renderUI()
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
     ImGui::End();
 
+    ImGuiIO &io = ImGui::GetIO();
+    if (io.KeyCtrl && io.KeyShift)
+    {
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false) && m_rawSqlEditorBuf[0] != '\0')
+        {
+            std::string formatted = dizui::sql::formatRawSqlQuery(std::string(m_rawSqlEditorBuf.data()));
+            snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", formatted.c_str());
+            addConsoleLog(tr("edit_menu.log_formatted"), LogLevel::Info);
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_C, false) && !m_visualQueryNodes.empty())
+        {
+            std::string compiledSql = dizui::sql::formatRawSqlQuery(compileVisualGraphToSelectQuery().toSQL());
+            ImGui::SetClipboardText(compiledSql.c_str());
+            addConsoleLog(tr("edit_menu.log_copied_clipboard"), LogLevel::Info);
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !m_visualQueryNodes.empty())
+        {
+            std::string compiledSql = dizui::sql::formatRawSqlQuery(compileVisualGraphToSelectQuery().toSQL());
+            snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", compiledSql.c_str());
+            addConsoleLog(tr("cte_stack.log_sql_copied"), LogLevel::Info);
+        }
+    }
+
     // 1. Dessin de la barre supérieure (Menu Bar principal)
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 10.0f));
     if (ImGui::BeginMainMenuBar())
@@ -333,12 +358,76 @@ void Application::renderUI()
                 m_showSaveProjectAsModal = true;
             }
 
+            ImGui::Separator();
+            if (ImGui::MenuItem((std::string(ICON_LC_LOG_OUT) + "  " + tr("menu.quit")).c_str(), "Ctrl+Q"))
+            {
+                if (GLFWwindow *currentWin = glfwGetCurrentContext())
+                {
+                    glfwSetWindowShouldClose(currentWin, GLFW_TRUE);
+                }
+            }
+
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu(tr("menu.edit")))
+        {
+            if (ImGui::BeginMenu(tr("menu.edit")))
+            {
+                bool hasRawSql = (m_rawSqlEditorBuf[0] != '\0');
+                bool hasVisualNodes = !m_visualQueryNodes.empty();
+
+                // 1. Formater le SQL de l'éditeur
+                if (ImGui::MenuItem((std::string(ICON_LC_ALIGN_LEFT) + "  " + tr("edit_menu.format_sql")).c_str(), "Ctrl+Shift+F", false, hasRawSql))
+                {
+                    std::string formatted = dizui::sql::formatRawSqlQuery(std::string(m_rawSqlEditorBuf.data()));
+                    snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", formatted.c_str());
+                    addConsoleLog(tr("edit_menu.log_formatted"), LogLevel::Info);
+                }
+
+                // 2. Copier le SQL compilé dans le presse-papiers système
+                if (ImGui::MenuItem((std::string(ICON_LC_COPY) + "  " + tr("edit_menu.copy_compiled_sql")).c_str(), "Ctrl+Shift+C", false, hasVisualNodes))
+                {
+                    std::string compiledSql = dizui::sql::formatRawSqlQuery(compileVisualGraphToSelectQuery().toSQL());
+                    ImGui::SetClipboardText(compiledSql.c_str());
+                    addConsoleLog(tr("edit_menu.log_copied_clipboard"), LogLevel::Info);
+                }
+
+                // 3. Synchroniser le graphe visuel vers l'éditeur SQL texte
+                if (ImGui::MenuItem((std::string(ICON_LC_REFRESH_CW) + "  " + tr("edit_menu.sync_from_designer")).c_str(), "Ctrl+Shift+S", false, hasVisualNodes))
+                {
+                    std::string compiledSql = dizui::sql::formatRawSqlQuery(compileVisualGraphToSelectQuery().toSQL());
+                    snprintf(m_rawSqlEditorBuf.data(), m_rawSqlEditorBuf.size(), "%s", compiledSql.c_str());
+                    addConsoleLog(tr("cte_stack.log_sql_copied"), LogLevel::Info);
+                }
+
+                ImGui::Separator();
+
+                // 4. Vider l'éditeur SQL texte
+                if (ImGui::MenuItem((std::string(ICON_LC_TRASH) + "  " + tr("edit_menu.clear_sql_editor")).c_str(), nullptr, false, hasRawSql))
+                {
+                    m_rawSqlEditorBuf.fill('\0');
+                    addConsoleLog(tr("edit_menu.log_cleared"), LogLevel::Info);
+                }
+
+                ImGui::EndMenu();
+            }
+
             ImGui::EndMenu();
+        }
+
         if (ImGui::BeginMenu(tr("menu.view")))
+        {
+            if (ImGui::MenuItem((std::string(ICON_LC_TERMINAL) + "  " + tr("menu.toggle_console")).c_str(), nullptr, m_showConsolePanel))
+            {
+                m_showConsolePanel = !m_showConsolePanel;
+                if (m_showConsolePanel)
+                {
+                    ImGui::SetWindowFocus("Console & Journaux d'Exécution###ConsoleBottomPanel");
+                }
+            }
+
             ImGui::EndMenu();
+        }
 
         if (ImGui::BeginMenu(tr("menu.language")))
         {
@@ -353,7 +442,14 @@ void Application::renderUI()
         }
 
         if (ImGui::BeginMenu(tr("menu.help")))
+        {
+            if (ImGui::MenuItem((std::string(ICON_LC_INFO) + "  " + tr("menu.about")).c_str()))
+            {
+                m_showAboutModal = true;
+            }
+
             ImGui::EndMenu();
+        }
 
         if (m_activeProject)
         {
@@ -451,6 +547,7 @@ void Application::renderUI()
     renderQueryResultsPanel();
     renderAiAssistantPanel();
     renderGlobalModals();
+    dizui::ui::renderAboutModal(m_showAboutModal);
 }
 
 void Application::applyTheme(AppTheme theme)
@@ -1739,17 +1836,16 @@ void Application::renderConnectionModals()
         if (!isValid)
             ImGui::BeginDisabled();
 
-        std::string confirmPhysBtn = std::string(tr("btn.confirm")) + "##PhysRen";
-        if (ImGui::Button(confirmPhysBtn.c_str(), ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
+        if (ImGui::Button((std::string(tr("btn.confirm")) + "##PhysRenOk").c_str(), ImVec2(105.0f, 0.0f)) || (enterPressed && isValid))
         {
             std::string newName(m_renamePhysConnBuf);
-            if (!m_renamingPhysConnOldName.empty() && m_renamingPhysConnOldName != newName &&
-                m_activeProject->physicalConnections().contains(m_renamingPhysConnOldName))
+            auto &physMap = m_activeProject->physicalConnections();
+            if (!m_renamingPhysConnOldName.empty() && m_renamingPhysConnOldName != newName && physMap.contains(m_renamingPhysConnOldName))
             {
-                cppsqlx::PhysicalConnection phys = m_activeProject->physicalConnections().at(m_renamingPhysConnOldName);
-                phys.name_ = newName;
-                m_activeProject->physicalConnections().erase(m_renamingPhysConnOldName);
-                m_activeProject->physicalConnections()[newName] = std::move(phys);
+                cppsqlx::PhysicalConnection copy = physMap.at(m_renamingPhysConnOldName);
+                copy.name_ = newName;
+                physMap.erase(m_renamingPhysConnOldName);
+                physMap[newName] = std::move(copy);
                 m_activeProject->resolveDependencies();
             }
             m_showRenamePhysConnModal = false;
@@ -1757,6 +1853,169 @@ void Application::renderConnectionModals()
         }
 
         if (!isValid)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+
+    // =========================================================================
+    // MODALE 3 : CRÉER / ÉDITER UNE PASSERELLE LOGIQUE (DEV / TEST / PROD)
+    // =========================================================================
+    std::string logModalTitle = std::string(tr("conn.log_modal_title")) + "###LogConnModal";
+    if (m_showLogConnModal)
+        ImGui::OpenPopup(logModalTitle.c_str());
+
+    ImGui::SetNextWindowSize(ImVec2(480.0f, 320.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal(logModalTitle.c_str(), &m_showLogConnModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "%s  %s", ICON_LC_GIT_BRANCH,
+                           m_isEditingLogConn ? tr("conn.log_edit_subtitle") : tr("conn.log_new_subtitle"));
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("%s", tr("conn.log_name_label"));
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##LogName", tr("conn.log_name_hint"), m_logConnNameBuf, IM_ARRAYSIZE(m_logConnNameBuf));
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s", tr("conn.env_mapping_header"));
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        auto renderEnvSelector = [&](const char *envLabel, const char *comboId, std::string &selectedPhys)
+        {
+            ImGui::Text("%-6s :", envLabel);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-1.0f);
+            const char *preview = selectedPhys.empty() ? tr("conn.unassigned") : selectedPhys.c_str();
+            if (ImGui::BeginCombo(comboId, preview))
+            {
+                if (ImGui::Selectable(tr("conn.unassigned"), selectedPhys.empty()))
+                {
+                    selectedPhys.clear();
+                }
+                for (const auto &[physName, physObj] : m_activeProject->physicalConnections())
+                {
+                    if (ImGui::Selectable(physName.c_str(), selectedPhys == physName))
+                    {
+                        selectedPhys = physName;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        };
+
+        renderEnvSelector("DEV", "##LogDevCombo", m_logConnDevTarget);
+        renderEnvSelector("TEST", "##LogTestCombo", m_logConnTestTarget);
+        renderEnvSelector("PROD", "##LogProdCombo", m_logConnProdTarget);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 230.0f);
+
+        std::string cancelLogBtn = std::string(tr("btn.cancel")) + "##LogModalCancel";
+        if (ImGui::Button(cancelLogBtn.c_str(), ImVec2(100.0f, 0.0f)))
+        {
+            m_showLogConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+
+        bool canSaveLog = (strlen(m_logConnNameBuf) > 0);
+        if (!canSaveLog)
+            ImGui::BeginDisabled();
+
+        std::string saveLogBtn = std::string(tr("btn.save")) + "##LogModalSave";
+        if (ImGui::Button(saveLogBtn.c_str(), ImVec2(120.0f, 0.0f)))
+        {
+            std::string newName(m_logConnNameBuf);
+            auto &gateways = m_activeProject->logicalConnections();
+            const auto &physMap = m_activeProject->physicalConnections();
+
+            if (m_isEditingLogConn && !m_originalLogConnName.empty() && m_originalLogConnName != newName)
+            {
+                gateways.erase(m_originalLogConnName);
+                if (m_selectedGateway == m_originalLogConnName)
+                    m_selectedGateway = newName;
+            }
+
+            cppsqlx::LogicalConnection gw(newName);
+            if (!m_logConnDevTarget.empty() && physMap.contains(m_logConnDevTarget))
+                gw.registerEnvironment("DEV", physMap.at(m_logConnDevTarget));
+            if (!m_logConnTestTarget.empty() && physMap.contains(m_logConnTestTarget))
+                gw.registerEnvironment("TEST", physMap.at(m_logConnTestTarget));
+            if (!m_logConnProdTarget.empty() && physMap.contains(m_logConnProdTarget))
+                gw.registerEnvironment("PROD", physMap.at(m_logConnProdTarget));
+
+            gateways[newName] = std::move(gw);
+            m_activeProject->resolveDependencies();
+
+            m_showLogConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        if (!canSaveLog)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+
+    // =========================================================================
+    // MODALE 4 : RENOMMER UNE PASSERELLE LOGIQUE
+    // =========================================================================
+    std::string renameLogTitle = std::string(tr("conn.rename_log_modal_title")) + "###RenameLogConnModal";
+    if (m_showRenameLogConnModal)
+        ImGui::OpenPopup(renameLogTitle.c_str());
+
+    ImGui::SetNextWindowSize(ImVec2(400.0f, 150.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal(renameLogTitle.c_str(), &m_showRenameLogConnModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::Text("%s", tr("conn.rename_log_label"));
+        ImGui::SetNextItemWidth(-1.0f);
+        bool enterPressed = ImGui::InputText("##RenameLogInput", m_renameLogConnBuf, IM_ARRAYSIZE(m_renameLogConnBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        float avail_x = ImGui::GetContentRegionAvail().x;
+        ImGui::SetCursorPosX(avail_x - 210.0f);
+
+        std::string cancelLogRenBtn = std::string(tr("btn.cancel")) + "##LogRenCancel";
+        if (ImGui::Button(cancelLogRenBtn.c_str(), ImVec2(95.0f, 0.0f)))
+        {
+            m_showRenameLogConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::SameLine();
+
+        bool isValidLogRen = (strlen(m_renameLogConnBuf) > 0);
+        if (!isValidLogRen)
+            ImGui::BeginDisabled();
+
+        if (ImGui::Button((std::string(tr("btn.confirm")) + "##LogRenOk").c_str(), ImVec2(105.0f, 0.0f)) || (enterPressed && isValidLogRen))
+        {
+            std::string newName(m_renameLogConnBuf);
+            auto &gateways = m_activeProject->logicalConnections();
+            if (!m_renamingLogConnOldName.empty() && m_renamingLogConnOldName != newName && gateways.contains(m_renamingLogConnOldName))
+            {
+                cppsqlx::LogicalConnection copy = gateways.at(m_renamingLogConnOldName);
+                copy.setName(newName);
+                gateways.erase(m_renamingLogConnOldName);
+                gateways[newName] = std::move(copy);
+                m_activeProject->resolveDependencies();
+
+                if (m_selectedGateway == m_renamingLogConnOldName)
+                    m_selectedGateway = newName;
+            }
+            m_showRenameLogConnModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        if (!isValidLogRen)
             ImGui::EndDisabled();
         ImGui::EndPopup();
     }
