@@ -58,6 +58,7 @@ nlohmann::json Application::serializeFullProjectToJSON()
         uiState["queries"].push_back({{"name", q.name},
                                       {"description", q.description},
                                       {"sql", q.sql},
+                                      {"folder", q.folder},
                                       {"visual_state", q.visualState},
                                       {"select_json", q.compiledSelectJson},
                                       {"output_schema", std::move(schemaArr)}});
@@ -206,6 +207,12 @@ bool Application::loadProjectFromFile(const std::string &filePath)
                     sq.name = qJson.value("name", "Requete");
                     sq.description = qJson.value("description", "");
                     sq.sql = qJson.value("sql", "");
+                    sq.folder = qJson.value("folder", m_activeProject->getQueryFolder(sq.name));
+                    if (!sq.folder.empty())
+                    {
+                        m_activeProject->setQueryFolder(sq.name, sq.folder);
+                    }
+
                     if (qJson.contains("visual_state"))
                         sq.visualState = qJson["visual_state"];
                     if (qJson.contains("select_json"))

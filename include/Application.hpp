@@ -143,7 +143,8 @@ private:
         std::string sql;
         nlohmann::json visualState;
         nlohmann::json compiledSelectJson;
-        std::vector<cppsqlx::ColumnMetadata> outputSchema; // Colonnes déduites via LIMIT 0
+        std::vector<cppsqlx::ColumnMetadata> outputSchema;
+        std::string folder;
     };
 
     struct WorkflowJobNode
@@ -238,6 +239,8 @@ private:
     void openCtePreviewModal(const std::string &cteQueryName);
     void renderCtePreviewModal();
     void renderCteStackEditor();
+
+    void renderQueryFolderModals();
 
     struct CteChainStep
     {
@@ -526,4 +529,11 @@ private:
     bool m_aiScrollToBottom = false;
 
     bool m_showAboutModal = false;
+
+    bool m_showCreateQueryFolderModal = false;
+    char m_newQueryFolderNameBuf[128] = "";
+
+    bool m_showRenameQueryFolderModal = false;
+    std::string m_renamingQueryFolderOldName;
+    char m_renameQueryFolderBuf[128] = "";
 };

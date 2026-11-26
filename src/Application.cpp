@@ -545,6 +545,7 @@ void Application::renderUI()
     renderMainContentZone();
     renderConsolePanel();
     renderQueryResultsPanel();
+    renderQueryFolderModals();
     renderAiAssistantPanel();
     renderGlobalModals();
     dizui::ui::renderAboutModal(m_showAboutModal);

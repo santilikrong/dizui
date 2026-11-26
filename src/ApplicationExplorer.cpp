@@ -266,7 +266,6 @@ void Application::renderProjectExplorerTree()
                 ImGui::PopID();
 
                 // 4. Opérateurs de flux
-                // 4. Opérateurs de flux
                 std::string flowOpsLabel = std::string(tr("explorer.flow_ops_root")) + "###FlowOpsTree";
                 if (ImGui::TreeNode(flowOpsLabel.c_str()))
                 {
@@ -285,20 +284,53 @@ void Application::renderProjectExplorerTree()
                     ImGui::TreePop();
                 }
 
-                // 5. Requêtes Enregistrées
+                // 5. Requêtes Enregistrées (avec classement par dossiers logiques)
+                ImGui::PushID("SavedQueriesSection");
                 std::string savedQueriesLabel = std::string(tr("explorer.saved_queries_root")) + "###SavedQueriesTree";
-                if (ImGui::TreeNode(savedQueriesLabel.c_str()))
+                bool queriesTreeOpen = ImGui::TreeNode(savedQueriesLabel.c_str());
+                // Cible Drag & Drop sur la racine : permet de sortir une requête d'un dossier
+                if (m_activeProject && ImGui::BeginDragDropTarget())
                 {
-                    if (m_savedQueries.empty())
+                    if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_CTE_QUERY_NODE"))
+                    {
+                        std::string droppedQueryName(static_cast<const char *>(payload->Data));
+                        for (auto &sq : m_savedQueries)
+                        {
+                            if (sq.name == droppedQueryName)
+                            {
+                                sq.folder.clear();
+                                m_activeProject->setQueryFolder(sq.name, "");
+                                break;
+                            }
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+
+                // Menu contextuel sur la racine : Créer un dossier logique
+                if (ImGui::BeginPopupContextItem("SavedQueriesRootCtx", ImGuiPopupFlags_MouseButtonRight))
+                {
+                    if (ImGui::MenuItem((std::string(ICON_LC_FOLDER_PLUS) + "  " + tr("explorer.ctx_new_folder")).c_str()))
+                    {
+                        memset(m_newQueryFolderNameBuf, 0, sizeof(m_newQueryFolderNameBuf));
+                        m_showCreateQueryFolderModal = true;
+                    }
+                    ImGui::EndPopup();
+                }
+
+                if (queriesTreeOpen)
+                {
+                    bool hasFolders = (m_activeProject && !m_activeProject->folders().empty());
+                    if (m_savedQueries.empty() && !hasFolders)
                     {
                         ImGui::TextDisabled("   %s", tr("explorer.no_queries"));
                     }
                     else
                     {
                         int queryIndexToDuplicate = -1;
-                        int totalQueries = static_cast<int>(m_savedQueries.size());
 
-                        for (int i = 0; i < totalQueries; ++i)
+                        // Helper d'affichage d'une ligne de requête (réutilisé pour chaque dossier et pour la racine)
+                        auto drawQueryRow = [&](int i)
                         {
                             auto &saved = m_savedQueries[i];
                             ImGui::PushID(i);
@@ -321,6 +353,30 @@ void Application::renderProjectExplorerTree()
                                 {
                                     m_inspectingQueryIndex = i;
                                     m_showInspectQueryModal = true;
+                                }
+
+                                // Sous-menu : Déplacer vers un dossier virtuel
+                                if (m_activeProject && ImGui::BeginMenu((std::string(ICON_LC_FOLDER_INPUT) + "  " + tr("explorer.ctx_move_to_folder")).c_str()))
+                                {
+                                    if (ImGui::MenuItem(tr("explorer.root_folder_option"), nullptr, saved.folder.empty()))
+                                    {
+                                        saved.folder.clear();
+                                        m_activeProject->setQueryFolder(saved.name, "");
+                                    }
+
+                                    if (!m_activeProject->folders().empty())
+                                        ImGui::Separator();
+
+                                    for (const auto &folderName : m_activeProject->folders())
+                                    {
+                                        bool isCurrentFolder = (saved.folder == folderName);
+                                        if (ImGui::MenuItem(folderName.c_str(), nullptr, isCurrentFolder))
+                                        {
+                                            saved.folder = folderName;
+                                            m_activeProject->setQueryFolder(saved.name, folderName);
+                                        }
+                                    }
+                                    ImGui::EndMenu();
                                 }
 
                                 ImGui::Separator();
@@ -367,27 +423,109 @@ void Application::renderProjectExplorerTree()
                             ImGui::SameLine(0.0f, 0.0f);
                             drawLargeIconText(ICON_LC_FILE_TEXT, saved.name.c_str(), 12.0f);
                             ImGui::PopID();
-                        }
+                        };
 
-                        // Duplication différée hors de la boucle d'itération
-                        if (queryIndexToDuplicate >= 0 && queryIndexToDuplicate < static_cast<int>(m_savedQueries.size()))
+                        int totalQueries = static_cast<int>(m_savedQueries.size());
+
+                        // A. Affichage des dossiers logiques (Finance, RH, etc.)
+                        if (m_activeProject)
                         {
-                            SavedQuery copy = m_savedQueries[queryIndexToDuplicate];
-                            std::string baseName = copy.name + tr("explorer.copy_suffix");
-                            std::string finalName = baseName;
-                            int suffix = 2;
-                            while (std::any_of(m_savedQueries.begin(), m_savedQueries.end(),
-                                               [&finalName](const SavedQuery &q)
-                                               { return q.name == finalName; }))
+                            std::string folderToDelete;
+                            for (const auto &folderName : m_activeProject->folders())
                             {
-                                finalName = baseName + "_" + std::to_string(suffix++);
+                                ImGui::PushID(("QueryFolder_" + folderName).c_str());
+                                std::string folderLabel = std::string(ICON_LC_FOLDER) + "  " + folderName + "###QueryFolderNode";
+                                bool folderOpen = ImGui::TreeNode(folderLabel.c_str());
+                                // Cible Drag & Drop : déposer une requête dans ce dossier
+                                if (ImGui::BeginDragDropTarget())
+                                {
+                                    if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("DND_CTE_QUERY_NODE"))
+                                    {
+                                        std::string droppedQueryName(static_cast<const char *>(payload->Data));
+                                        for (auto &sq : m_savedQueries)
+                                        {
+                                            if (sq.name == droppedQueryName)
+                                            {
+                                                sq.folder = folderName;
+                                                m_activeProject->setQueryFolder(sq.name, folderName);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    ImGui::EndDragDropTarget();
+                                }
+
+                                // Menu contextuel du dossier : Renommer / Supprimer
+                                if (ImGui::BeginPopupContextItem("QueryFolderContextMenu"))
+                                {
+                                    if (ImGui::MenuItem((std::string(ICON_LC_TYPE) + "  " + tr("explorer.ctx_rename_folder")).c_str()))
+                                    {
+                                        m_renamingQueryFolderOldName = folderName;
+                                        strncpy(m_renameQueryFolderBuf, folderName.c_str(), sizeof(m_renameQueryFolderBuf) - 1);
+                                        m_renameQueryFolderBuf[sizeof(m_renameQueryFolderBuf) - 1] = '\0';
+                                        m_showRenameQueryFolderModal = true;
+                                    }
+
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.0f));
+                                    if (ImGui::MenuItem((std::string(ICON_LC_TRASH) + "  " + tr("explorer.ctx_delete_folder")).c_str()))
+                                    {
+                                        folderToDelete = folderName;
+                                    }
+                                    ImGui::PopStyleColor();
+                                    ImGui::EndPopup();
+                                }
+
+                                if (folderOpen)
+                                {
+                                    for (int i = 0; i < totalQueries; ++i)
+                                    {
+                                        if (m_savedQueries[i].folder == folderName)
+                                            drawQueryRow(i);
+                                    }
+                                    ImGui::TreePop();
+                                }
+                                ImGui::PopID();
                             }
-                            copy.name = finalName;
-                            m_savedQueries.push_back(std::move(copy));
+
+                            if (!folderToDelete.empty())
+                            {
+                                m_activeProject->removeFolder(folderToDelete, true);
+                                for (auto &sq : m_savedQueries)
+                                {
+                                    if (sq.folder == folderToDelete)
+                                        sq.folder.clear();
+                                }
+                            }
+                            // B. Affichage des requêtes sans dossier (à la racine)
+                            for (int i = 0; i < totalQueries; ++i)
+                            {
+                                if (m_savedQueries[i].folder.empty())
+                                    drawQueryRow(i);
+                            }
+                            // Duplication différée hors de la boucle d'itération
+                            if (queryIndexToDuplicate >= 0 && queryIndexToDuplicate < static_cast<int>(m_savedQueries.size()))
+                            {
+                                SavedQuery copy = m_savedQueries[queryIndexToDuplicate];
+                                std::string baseName = copy.name + tr("explorer.copy_suffix");
+                                std::string finalName = baseName;
+                                int suffix = 2;
+                                while (std::any_of(m_savedQueries.begin(), m_savedQueries.end(),
+                                                   [&finalName](const SavedQuery &q)
+                                                   { return q.name == finalName; }))
+                                {
+                                    finalName = baseName + "_" + std::to_string(suffix++);
+                                }
+                                copy.name = finalName;
+                                if (m_activeProject && !copy.folder.empty())
+                                    m_activeProject->setQueryFolder(copy.name, copy.folder);
+                                m_savedQueries.push_back(std::move(copy));
+                            }
                         }
+                        ImGui::TreePop();
                     }
-                    ImGui::TreePop();
+                    // ImGui::PopID();
                 }
+                ImGui::PopID();
 
                 // 6. Tâches (Pipelines)
                 ImGui::PushID("TasksHeaderNode");
@@ -1051,6 +1189,94 @@ void Application::renderQueryInspectAndDeleteModals()
             ImGui::CloseCurrentPopup();
         }
         ImGui::PopStyleColor();
+        ImGui::EndPopup();
+    }
+}
+
+void Application::renderQueryFolderModals()
+{
+    if (!m_activeProject)
+        return;
+
+    // =========================================================================
+    // MODALE 1 : CRÉER UN DOSSIER LOGIQUE DE REQUÊTES
+    // =========================================================================
+    std::string newFolderModalTitle = std::string(tr("explorer.new_folder_modal_title")) + "###CreateQueryFolderModal";
+    if (m_showCreateQueryFolderModal)
+        ImGui::OpenPopup(newFolderModalTitle.c_str());
+
+    ImGui::SetNextWindowSize(ImVec2(380.0f, 145.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal(newFolderModalTitle.c_str(), &m_showCreateQueryFolderModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::Text("%s", tr("explorer.folder_name_label"));
+        ImGui::SetNextItemWidth(-1.0f);
+        bool enterPressed = ImGui::InputText("##NewQueryFolderInput", m_newQueryFolderNameBuf, IM_ARRAYSIZE(m_newQueryFolderNameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
+        {
+            m_showCreateQueryFolderModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool valid = (strlen(m_newQueryFolderNameBuf) > 0);
+        if (!valid)
+            ImGui::BeginDisabled();
+        if (ImGui::Button(tr("btn.confirm"), ImVec2(110.0f, 0.0f)) || (enterPressed && valid))
+        {
+            m_activeProject->createFolder(std::string(m_newQueryFolderNameBuf));
+            m_showCreateQueryFolderModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!valid)
+            ImGui::EndDisabled();
+        ImGui::EndPopup();
+    }
+
+    // =========================================================================
+    // MODALE 2 : RENOMMER UN DOSSIER LOGIQUE DE REQUÊTES
+    // =========================================================================
+    std::string renFolderModalTitle = std::string(tr("explorer.rename_folder_modal_title")) + "###RenameQueryFolderModal";
+    if (m_showRenameQueryFolderModal)
+        ImGui::OpenPopup(renFolderModalTitle.c_str());
+
+    ImGui::SetNextWindowSize(ImVec2(380.0f, 145.0f), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal(renFolderModalTitle.c_str(), &m_showRenameQueryFolderModal, ImGuiWindowFlags_NoResize))
+    {
+        ImGui::Text("%s", tr("explorer.folder_name_label"));
+        ImGui::SetNextItemWidth(-1.0f);
+        bool enterPressed = ImGui::InputText("##RenQueryFolderInput", m_renameQueryFolderBuf, IM_ARRAYSIZE(m_renameQueryFolderBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (ImGui::Button(tr("btn.cancel"), ImVec2(100.0f, 0.0f)))
+        {
+            m_showRenameQueryFolderModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        bool valid = (strlen(m_renameQueryFolderBuf) > 0);
+        if (!valid)
+            ImGui::BeginDisabled();
+        if (ImGui::Button(tr("btn.confirm"), ImVec2(110.0f, 0.0f)) || (enterPressed && valid))
+        {
+            std::string newName(m_renameQueryFolderBuf);
+            m_activeProject->renameFolder(m_renamingQueryFolderOldName, newName);
+            for (auto &sq : m_savedQueries)
+            {
+                if (sq.folder == m_renamingQueryFolderOldName)
+                    sq.folder = newName;
+            }
+            m_showRenameQueryFolderModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!valid)
+            ImGui::EndDisabled();
         ImGui::EndPopup();
     }
 }
