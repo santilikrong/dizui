@@ -165,6 +165,9 @@ void Application::renderWorkflowCanvas()
         }
     }
 
+    // Stocke le pourcentage lissé par nœud pour une animation fluide entre les étapes SQL
+    static std::unordered_map<uintptr_t, float> s_smoothedPercent;
+
     // 3. Rendu des nœuds de jobs
     for (auto &node : m_workflowNodes)
     {
@@ -174,26 +177,43 @@ void Application::renderWorkflowCanvas()
             ed::SetNodePosition(node.id, node.position);
         }
 
+        // Lecture thread-safe AVANT la définition des couleurs du nœud
+        VisualJobStatus currentJobStatus = node.executionStatus;
+        std::string liveMsg = node.statusMessage;
+        int stepCur = 0;
+        int stepTot = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
+            if (m_liveJobStatuses.contains(node.taskName))
+                currentJobStatus = m_liveJobStatuses[node.taskName];
+            if (m_liveJobMessages.contains(node.taskName))
+                liveMsg = m_liveJobMessages[node.taskName];
+            stepCur = node.currentStep;
+            stepTot = node.totalSteps;
+        }
+        node.executionStatus = currentJobStatus;
+        node.statusMessage = liveMsg;
+
         ImVec4 nodeBgColor = ImVec4(0.11f, 0.16f, 0.25f, 0.95f);
         ImVec4 borderColor = ImVec4(0.25f, 0.45f, 0.75f, 1.0f);
         ImVec4 statusTextColor = ImVec4(0.45f, 0.70f, 1.0f, 1.0f);
         const char *statusTag = tr("wf_node.status_idle");
 
-        if (node.executionStatus == VisualJobStatus::Running)
+        if (currentJobStatus == VisualJobStatus::Running)
         {
             nodeBgColor = ImVec4(0.22f, 0.12f, 0.32f, 0.95f);
             borderColor = ImVec4(0.65f, 0.30f, 0.95f, 1.0f);
             statusTextColor = ImVec4(0.80f, 0.50f, 1.0f, 1.0f);
             statusTag = tr("wf_node.status_running");
         }
-        else if (node.executionStatus == VisualJobStatus::Success)
+        else if (currentJobStatus == VisualJobStatus::Success)
         {
             nodeBgColor = ImVec4(0.10f, 0.24f, 0.16f, 0.95f);
             borderColor = ImVec4(0.20f, 0.80f, 0.40f, 1.0f);
             statusTextColor = ImVec4(0.30f, 0.90f, 0.50f, 1.0f);
             statusTag = tr("wf_node.status_success");
         }
-        else if (node.executionStatus == VisualJobStatus::Failed)
+        else if (currentJobStatus == VisualJobStatus::Failed)
         {
             nodeBgColor = ImVec4(0.28f, 0.10f, 0.12f, 0.95f);
             borderColor = ImVec4(0.90f, 0.25f, 0.25f, 1.0f);
@@ -206,18 +226,6 @@ void Application::renderWorkflowCanvas()
         ed::PushStyleVar(ed::StyleVar_NodePadding, ImVec4(0.0f, 10.0f, 0.0f, 10.0f));
         ed::PushStyleVar(ed::StyleVar_NodeRounding, 6.0f);
 
-        // Lecture thread-safe de l'état et de l'avancement des étapes du nœud
-        VisualJobStatus currentJobStatus = VisualJobStatus::Idle;
-        int stepCur = 0;
-        int stepTot = 0;
-        {
-            std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
-            if (m_liveJobStatuses.contains(node.taskName))
-                currentJobStatus = m_liveJobStatuses[node.taskName];
-            stepCur = node.currentStep;
-            stepTot = node.totalSteps;
-        }
-
         ed::BeginNode(node.id);
         ImGui::BeginGroup();
 
@@ -227,13 +235,35 @@ void Application::renderWorkflowCanvas()
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
         ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.85f), "%s", node.taskName.c_str());
 
+        // Calcul du pourcentage lissé (sans saut brutal entre 0% et 100%)
+        float &smoothedPct = s_smoothedPercent[node.id];
+        if (currentJobStatus == VisualJobStatus::Idle)
+        {
+            smoothedPct = 0.0f;
+        }
+        else if (currentJobStatus == VisualJobStatus::Success)
+        {
+            smoothedPct = 100.0f;
+        }
+        else if (currentJobStatus == VisualJobStatus::Running && stepTot > 0)
+        {
+            float basePct = (static_cast<float>(stepCur) / static_cast<float>(stepTot)) * 100.0f;
+            float nextStepCap = (static_cast<float>(std::min(stepCur + 1, stepTot)) / static_cast<float>(stepTot)) * 100.0f - 2.0f;
+            if (nextStepCap < basePct)
+                nextStepCap = basePct;
+
+            if (smoothedPct < basePct)
+                smoothedPct = basePct;
+            else if (smoothedPct < nextStepCap)
+                smoothedPct = std::min(nextStepCap, smoothedPct + ImGui::GetIO().DeltaTime * 12.0f);
+        }
+
         // Affichage épuré sans fond de l'avancement en nombre d'étapes et pourcentage
         if (stepTot > 0 && (currentJobStatus == VisualJobStatus::Running ||
                             currentJobStatus == VisualJobStatus::Success ||
                             currentJobStatus == VisualJobStatus::Failed))
         {
-            float fraction = std::clamp(static_cast<float>(stepCur) / static_cast<float>(stepTot), 0.0f, 1.0f);
-            int percent = static_cast<int>(fraction * 100.0f);
+            int percent = static_cast<int>(std::clamp(smoothedPct, 0.0f, 100.0f));
 
             ImVec4 progressColor = ImVec4(0.35f, 0.85f, 0.50f, 1.0f);
             const char *stepIcon = ICON_LC_CHECK;
@@ -669,7 +699,7 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
         return;
     }
 
-    // 4. Initialisation de tous les jobs en statut "En attente" et calcul du total d'étapes par tâche
+    // 4. Initialisation de tous les jobs en statut "En attente" et calcul fiable du total d'étapes
     {
         std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
         m_liveJobStatuses.clear();
@@ -684,8 +714,15 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
             node.currentStep = 0;
             node.totalSteps = 0;
 
-            auto taskIt = projectTasks.find(node.taskName);
-            if (taskIt != projectTasks.end())
+            // Recherche prioritaire dans m_savedTasks (source UI la plus récente), sinon dans m_activeProject
+            auto savedIt = std::find_if(m_savedTasks.begin(), m_savedTasks.end(),
+                                        [&node](const cppsqlx::Task &t)
+                                        { return t.name() == node.taskName; });
+            if (savedIt != m_savedTasks.end())
+            {
+                node.totalSteps = static_cast<int>(savedIt->steps().size());
+            }
+            else if (auto taskIt = projectTasks.find(node.taskName); taskIt != projectTasks.end())
             {
                 node.totalSteps = static_cast<int>(taskIt->second.steps().size());
             }
@@ -706,29 +743,35 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
                 std::lock_guard<std::mutex> lock(m_workflowStatusMutex);
                 m_liveJobMessages[jobName] = msg;
 
+                VisualJobStatus visualStatus = VisualJobStatus::Idle;
                 if (status == cppsqlx::JobStatus::Running)
-                    m_liveJobStatuses[jobName] = VisualJobStatus::Running;
+                    visualStatus = VisualJobStatus::Running;
                 else if (status == cppsqlx::JobStatus::Success)
-                    m_liveJobStatuses[jobName] = VisualJobStatus::Success;
+                    visualStatus = VisualJobStatus::Success;
                 else if (status == cppsqlx::JobStatus::Failed)
-                    m_liveJobStatuses[jobName] = VisualJobStatus::Failed;
-                else
-                    m_liveJobStatuses[jobName] = VisualJobStatus::Idle;
+                    visualStatus = VisualJobStatus::Failed;
+
+                m_liveJobStatuses[jobName] = visualStatus;
 
                 // Mise à jour de l'avancement des étapes sur les nœuds correspondants
                 for (auto &node : m_workflowNodes)
                 {
-                    if (node.taskName != jobName)
+                    if (node.taskName != jobName && jobName.find(node.taskName) == std::string::npos)
                         continue;
+
+                    // Synchronise aussi la clé exacte du nœud si le jobName du moteur était préfixé
+                    m_liveJobStatuses[node.taskName] = visualStatus;
+                    m_liveJobMessages[node.taskName] = msg;
 
                     if (status == cppsqlx::JobStatus::Success)
                     {
-                        if (node.totalSteps > 0)
-                            node.currentStep = node.totalSteps;
+                        if (node.totalSteps <= 0)
+                            node.totalSteps = 1;
+                        node.currentStep = node.totalSteps;
                     }
                     else if (status == cppsqlx::JobStatus::Running)
                     {
-                        // Détection d'un message de progression détaillé (ex: "STEP:2/5" ou "Step 2/5")
+                        // 1. Cas format "2/5"
                         size_t sepPos = msg.find('/');
                         if (sepPos != std::string::npos && sepPos > 0)
                         {
@@ -752,6 +795,29 @@ void Application::launchWorkflowExecutionAsync(const std::string &logicalConnNam
                                 }
                                 catch (...)
                                 {
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // 2. Repli : extrait le premier numéro d'étape mentionné (ex: "Step 2" ou "Étape 2")
+                            for (size_t idx = 0; idx < msg.size(); ++idx)
+                            {
+                                if (std::isdigit(static_cast<unsigned char>(msg[idx])))
+                                {
+                                    size_t endIdx = idx;
+                                    while (endIdx < msg.size() && std::isdigit(static_cast<unsigned char>(msg[endIdx])))
+                                        ++endIdx;
+                                    try
+                                    {
+                                        int stepNum = std::stoi(msg.substr(idx, endIdx - idx));
+                                        if (stepNum > 0 && (node.totalSteps == 0 || stepNum <= node.totalSteps))
+                                            node.currentStep = stepNum;
+                                    }
+                                    catch (...)
+                                    {
+                                    }
+                                    break;
                                 }
                             }
                         }

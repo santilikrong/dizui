@@ -1,6 +1,7 @@
 #include "Application.hpp"
 #include <Localization.hpp>
 #include "IconsLucide.hpp"
+#include "SqlFunctionsCatalog.hpp"
 #include <cppsqlx/sqlliterals.hpp>
 #include <cppsqlx/sqljoinexpressionbuilder.hpp>
 #include <imgui_node_editor.h>
@@ -1925,7 +1926,11 @@ void Application::renderExpressionEditorModal()
         ImGui::SameLine();
 
         // COLONNE 2 (CENTRE) : Zone d'édition de la formule SQL
-        float centerWidth = ImGui::GetContentRegionAvail().x - 245.0f;
+        // COLONNE 2 (CENTRE) : Zone d'édition de la formule SQL
+        float rightColWidth = 260.0f;
+        float centerWidth = ImGui::GetContentRegionAvail().x - rightColWidth - ImGui::GetStyle().ItemSpacing.x;
+        if (centerWidth < 220.0f)
+            centerWidth = 220.0f;
         ImGui::BeginChild("ExprEditorZone", ImVec2(centerWidth, bodyHeight), true);
         ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "%s", tr("expr_modal.formula_header"));
         ImGui::Separator();
@@ -1968,67 +1973,71 @@ void Application::renderExpressionEditorModal()
 
         ImGui::SameLine();
 
-        // COLONNE 3 (DROITE) : Catalogue de fonctions SQL prêtes à l'emploi
-        ImGui::BeginChild("ExprFunctionsCatalog", ImVec2(235.0f, bodyHeight), true);
+        // COLONNE 3 (DROITE) : Catalogue classé des fonctions & opérateurs SQL
+        ImGui::BeginChild("ExprFunctionsZone", ImVec2(260.0f, bodyHeight), true);
         ImGui::TextColored(ImVec4(0.75f, 0.55f, 1.0f, 1.0f), "%s", tr("expr_modal.functions_header"));
         ImGui::Separator();
         ImGui::Spacing();
 
-        struct SqlFuncTemplate
-        {
-            const char *label;
-            const char *snippet;
-            bool isAgg;
-            bool isWin;
-        };
-        const SqlFuncTemplate funcs[] = {
-            // Fonctions scalaires
-            {"CONCAT(a, ' ', b)", "CONCAT(, ' ', )", false, false},
-            {"UPPER(str)", "UPPER()", false, false},
-            {"LOWER(str)", "LOWER()", false, false},
-            {"TRIM(str)", "TRIM()", false, false},
-            {"SUBSTRING(str, 1, 3)", "SUBSTRING(, 1, 3)", false, false},
-            {"COALESCE(val, 0)", "COALESCE(, 0)", false, false},
-            {"CASE WHEN ... END", "CASE WHEN  THEN  ELSE  END", false, false},
-            {"ROUND(num, 2)", "ROUND(, 2)", false, false},
-            {"CAST(... AS NUMERIC)", "CAST( AS NUMERIC)", false, false},
-            {"EXTRACT(YEAR FROM d)", "EXTRACT(YEAR FROM )", false, false},
-            {"TO_CHAR(d, 'YYYY-MM')", "TO_CHAR(, 'YYYY-MM')", false, false},
-            // Fonctions d'agrégation
-            {"SUM(col)", "SUM()", true, false},
-            {"COUNT(col)", "COUNT()", true, false},
-            {"COUNT(DISTINCT col)", "COUNT(DISTINCT )", true, false},
-            {"AVG(col)", "AVG()", true, false},
-            {"MIN(col)", "MIN()", true, false},
-            {"MAX(col)", "MAX()", true, false},
-            // Fonctions de fenêtrage (Window Functions)
-            {"ROW_NUMBER() OVER (...)", "ROW_NUMBER() OVER (PARTITION BY  ORDER BY )", false, true},
-            {"RANK() OVER (...)", "RANK() OVER (PARTITION BY  ORDER BY )", false, true},
-            {"DENSE_RANK() OVER (...)", "DENSE_RANK() OVER (PARTITION BY  ORDER BY )", false, true},
-            {"LAG(col, 1) OVER (...)", "LAG(, 1) OVER (PARTITION BY  ORDER BY )", false, true},
-            {"LEAD(col, 1) OVER (...)", "LEAD(, 1) OVER (PARTITION BY  ORDER BY )", false, true},
-            {"SUM(col) OVER (...)", "SUM() OVER (PARTITION BY  ORDER BY )", false, true},
-            {"AVG(col) OVER (...)", "AVG() OVER (PARTITION BY )", false, true},
-            {"FIRST_VALUE(col) OVER (...)", "FIRST_VALUE() OVER (PARTITION BY  ORDER BY )", false, true}};
+        static int s_selectedSqlCatIdx = 0;
+        static char s_funcSearchBuf[128] = "";
 
-        for (const auto &fn : funcs)
+        const auto &categories = dizui::sql::getAllCategories();
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("##SqlFuncCatCombo", tr(dizui::sql::getCategoryTranslationKey(categories[s_selectedSqlCatIdx]))))
         {
+            for (int cIdx = 0; cIdx < static_cast<int>(categories.size()); ++cIdx)
+            {
+                bool isSel = (s_selectedSqlCatIdx == cIdx);
+                if (ImGui::Selectable(tr(dizui::sql::getCategoryTranslationKey(categories[cIdx])), isSel))
+                {
+                    s_selectedSqlCatIdx = cIdx;
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##SqlFuncSearchInput", tr("expr_modal.search_func_hint"), s_funcSearchBuf, IM_ARRAYSIZE(s_funcSearchBuf));
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        ImGui::BeginChild("SqlFuncFilteredList", ImVec2(0.0f, 0.0f), false);
+        std::string searchLower(s_funcSearchBuf);
+        std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), ::tolower);
+        dizui::sql::SqlCategory activeCat = categories[s_selectedSqlCatIdx];
+
+        for (const auto &fn : dizui::sql::getSqlFunctionsCatalog())
+        {
+            if (activeCat != dizui::sql::SqlCategory::All && fn.category != activeCat)
+                continue;
+
+            if (!searchLower.empty())
+            {
+                std::string lblLower(fn.label);
+                std::transform(lblLower.begin(), lblLower.end(), lblLower.begin(), ::tolower);
+                if (lblLower.find(searchLower) == std::string::npos)
+                    continue;
+            }
+
             if (ImGui::Selectable(fn.label))
             {
                 insertSnippetAtCursor(fn.snippet);
-                if (fn.isAgg)
+                if (fn.isAggregate)
                 {
                     m_exprIsAggregate = true;
                     m_exprIsWindow = false;
                 }
-                else if (fn.isWin)
+                else if (fn.isWindow)
                 {
                     m_exprIsWindow = true;
                     m_exprIsAggregate = false;
                 }
             }
-            ImGui::SetItemTooltip("%s : %s", tr("expr_modal.insert_func_tooltip"), fn.snippet);
+            ImGui::SetItemTooltip("%s\n(%s)", tr(fn.descKey), fn.snippet);
         }
+        ImGui::EndChild();
+
         ImGui::EndChild();
 
         // PIED DE PAGE : Annuler / Valider
